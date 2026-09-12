@@ -139,6 +139,89 @@ impl Position {
         Ok(pos)
     }
 
+    /// 現在の局面をSFEN文字列に変換
+    pub fn to_sfen(&self) -> String {
+        let mut s = String::new();
+        // 1. 盤面 (1段目から9段目)
+        for rank in 0..9 {
+            if rank > 0 {
+                s.push('/');
+            }
+            let mut empty_count = 0;
+            for file in (0..9).rev() {
+                let sq = Square::new(file, rank);
+                if let Some(piece) = self.board[sq.index()] {
+                    if empty_count > 0 {
+                        s.push_str(&empty_count.to_string());
+                        empty_count = 0;
+                    }
+                    s.push_str(&piece.to_sfen());
+                } else {
+                    empty_count += 1;
+                }
+            }
+            if empty_count > 0 {
+                s.push_str(&empty_count.to_string());
+            }
+        }
+
+        // 2. 手番
+        s.push(' ');
+        s.push(match self.side_to_move {
+            Color::Black => 'b',
+            Color::White => 'w',
+        });
+
+        // 3. 持ち駒 (飛, 角, 金, 銀, 桂, 香, 歩 の順)
+        s.push(' ');
+        let mut hand_str = String::new();
+        for color in [Color::Black, Color::White] {
+            for pt in [
+                PieceType::Rook,
+                PieceType::Bishop,
+                PieceType::Gold,
+                PieceType::Silver,
+                PieceType::Knight,
+                PieceType::Lance,
+                PieceType::Pawn,
+            ] {
+                if let Some(h_idx) = pt.hand_index() {
+                    let count = self.hand[color.index()][h_idx];
+                    if count > 0 {
+                        if count > 1 {
+                            hand_str.push_str(&count.to_string());
+                        }
+                        let mut c = match pt {
+                            PieceType::Rook => 'r',
+                            PieceType::Bishop => 'b',
+                            PieceType::Gold => 'g',
+                            PieceType::Silver => 's',
+                            PieceType::Knight => 'n',
+                            PieceType::Lance => 'l',
+                            PieceType::Pawn => 'p',
+                            _ => '?',
+                        };
+                        if color == Color::Black {
+                            c = c.to_ascii_uppercase();
+                        }
+                        hand_str.push(c);
+                    }
+                }
+            }
+        }
+        if hand_str.is_empty() {
+            s.push('-');
+        } else {
+            s.push_str(&hand_str);
+        }
+
+        // 4. 手数
+        s.push(' ');
+        s.push_str(&self.ply.to_string());
+
+        s
+    }
+
     /// 局面全体のハッシュを新規計算
     pub fn compute_hash(&self) -> u64 {
         let keys = get_zobrist_keys();
