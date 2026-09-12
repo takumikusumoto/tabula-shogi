@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Target tag name (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_name: tabula-shogi.exe
+            asset_ext: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: tabula-shogi
+            asset_ext: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Windows asset
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ github.event.inputs.tag_name }}" }
+          $pkgName = "tabula-shogi-$tag-windows-x86_64"
+          New-Item -ItemType Directory -Path $pkgName
+          Copy-Item "target/release/tabula-shogi.exe" -Destination "$pkgName/"
+          Copy-Item "README.md" -Destination "$pkgName/"
+          Copy-Item "LICENSE" -Destination "$pkgName/"
+          Compress-Archive -Path "$pkgName/*" -DestinationPath "$pkgName.zip"
+          echo "ASSET_PATH=$pkgName.zip" >> $env:GITHUB_ENV
+
+      - name: Package Linux asset
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          fi
+          PKG_NAME="tabula-shogi-$TAG-linux-x86_64"
+          mkdir -p "$PKG_NAME"
+          cp target/release/tabula-shogi "$PKG_NAME/"
+          cp README.md "$PKG_NAME/"
+          cp LICENSE "$PKG_NAME/"
+          chmod +x "$PKG_NAME/tabula-shogi"
+          tar -czf "$PKG_NAME.tar.gz" -C "$PKG_NAME" .
+          echo "ASSET_PATH=$PKG_NAME.tar.gz" >> $GITHUB_ENV
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag_name }}
+          files: ${{ env.ASSET_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
