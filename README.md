@@ -58,7 +58,7 @@ cargo build --release
 3. **「エンジンを追加」** をクリックします。
 4. エンジンの実行ファイルとして、ビルドされた `tabula-shogi.exe` の絶対パスを指定します：
    - 例: `C:\path\to\tabula-shogi\target\release\tabula-shogi.exe`
-5. エンジン名が自動的に `TabulaShogi 0.1.0` と認識されます。
+5. エンジン名が自動的に `TabulaShogi <version>`（例: `TabulaShogi 0.1.0`）と認識されます。
 6. 設定を保存すれば、通常の対局や検討、棋譜解析で選択可能になります。
 
 ---
