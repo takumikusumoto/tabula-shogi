@@ -25,6 +25,12 @@ fn main() {
         "train-nnue" => {
             run_train_nnue(&args[2..]);
         }
+        "match" => {
+            run_match(&args[2..]);
+        }
+        "loop" => {
+            run_loop(&args[2..]);
+        }
         "bench" => {
             run_benchmark();
         }
@@ -198,6 +204,218 @@ fn run_benchmark() {
     );
 }
 
+fn parse_eval_mode(desc: &str) -> (String, tabula_shogi::eval::EvalMode) {
+    if desc.eq_ignore_ascii_case("hce") {
+        ("HCE".to_string(), tabula_shogi::eval::EvalMode::Hce)
+    } else if desc.eq_ignore_ascii_case("nnue") {
+        (
+            "NNUE(built-in)".to_string(),
+            tabula_shogi::eval::EvalMode::Nnue(std::sync::Arc::new(
+                tabula_shogi::eval::NNUEEvaluator::new(),
+            )),
+        )
+    } else {
+        match tabula_shogi::eval::NNUEEvaluator::load_from_file(desc) {
+            Ok(nnue) => (
+                desc.to_string(),
+                tabula_shogi::eval::EvalMode::Nnue(std::sync::Arc::new(nnue)),
+            ),
+            Err(e) => {
+                eprintln!("Warning: Failed to load NNUE file '{desc}' ({e}). Falling back to HCE.");
+                (
+                    "HCE(fallback)".to_string(),
+                    tabula_shogi::eval::EvalMode::Hce,
+                )
+            }
+        }
+    }
+}
+
+fn run_match(args: &[String]) {
+    use tabula_shogi::arena::{MatchConfig, MatchRunner, SprtConfig};
+
+    let mut engine1_desc = "HCE".to_string();
+    let mut engine2_desc = "NNUE".to_string();
+    let mut pairs = 20;
+    let mut depth = 2;
+    let mut threads = 2;
+    let mut opening = 6;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--engine1" | "-e1" => {
+                if i + 1 < args.len() {
+                    engine1_desc = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--engine2" | "-e2" => {
+                if i + 1 < args.len() {
+                    engine2_desc = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--pairs" | "-p" => {
+                if i + 1 < args.len() {
+                    pairs = args[i + 1].parse().unwrap_or(pairs);
+                    i += 1;
+                }
+            }
+            "--depth" | "-d" => {
+                if i + 1 < args.len() {
+                    depth = args[i + 1].parse().unwrap_or(depth);
+                    i += 1;
+                }
+            }
+            "--threads" | "-t" => {
+                if i + 1 < args.len() {
+                    threads = args[i + 1].parse().unwrap_or(threads);
+                    i += 1;
+                }
+            }
+            "--opening" | "-o" => {
+                if i + 1 < args.len() {
+                    opening = args[i + 1].parse().unwrap_or(opening);
+                    i += 1;
+                }
+            }
+            "--help" | "-h" => {
+                println!("TabulaShogi Arena Match");
+                println!("USAGE:\n    tabula-shogi match [OPTIONS]");
+                println!("OPTIONS:");
+                println!("    --engine1 <HCE|NNUE|PATH>   First engine model [default: HCE]");
+                println!("    --engine2 <HCE|NNUE|PATH>   Second engine model [default: NNUE]");
+                println!(
+                    "    -p, --pairs <N>             Number of game pairs [default: 20] (total = 2*pairs)"
+                );
+                println!("    -d, --depth <D>             Search depth [default: 2]");
+                println!("    -t, --threads <T>           Worker threads [default: 2]");
+                println!("    -o, --opening <K>           Random opening plies [default: 6]");
+                return;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let (name_a, eval_a) = parse_eval_mode(&engine1_desc);
+    let (name_b, eval_b) = parse_eval_mode(&engine2_desc);
+
+    let config = MatchConfig {
+        name_a,
+        name_b,
+        eval_a,
+        eval_b,
+        pairs,
+        depth,
+        threads,
+        random_opening: opening,
+        max_plies: 320,
+        tt_size_mb: 16,
+        sprt_config: Some(SprtConfig::default()),
+    };
+
+    MatchRunner::run_match(&config);
+}
+
+fn run_loop(args: &[String]) {
+    use tabula_shogi::arena::{LoopConfig, SelfImprovementLoop};
+
+    let mut config = LoopConfig::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--iterations" | "-i" => {
+                if i + 1 < args.len() {
+                    config.iterations = args[i + 1].parse().unwrap_or(config.iterations);
+                    i += 1;
+                }
+            }
+            "--games" | "-g" => {
+                if i + 1 < args.len() {
+                    config.games_per_iteration =
+                        args[i + 1].parse().unwrap_or(config.games_per_iteration);
+                    i += 1;
+                }
+            }
+            "--eval-pairs" | "-p" => {
+                if i + 1 < args.len() {
+                    config.eval_pairs = args[i + 1].parse().unwrap_or(config.eval_pairs);
+                    i += 1;
+                }
+            }
+            "--threads" | "-t" => {
+                if i + 1 < args.len() {
+                    config.threads = args[i + 1].parse().unwrap_or(config.threads);
+                    i += 1;
+                }
+            }
+            "--depth" | "-d" => {
+                if i + 1 < args.len() {
+                    config.depth = args[i + 1].parse().unwrap_or(config.depth);
+                    i += 1;
+                }
+            }
+            "--epochs" | "-e" => {
+                if i + 1 < args.len() {
+                    config.epochs = args[i + 1].parse().unwrap_or(config.epochs);
+                    i += 1;
+                }
+            }
+            "--lr" => {
+                if i + 1 < args.len() {
+                    config.lr = args[i + 1].parse().unwrap_or(config.lr);
+                    i += 1;
+                }
+            }
+            "--data" => {
+                if i + 1 < args.len() {
+                    config.data_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--best" => {
+                if i + 1 < args.len() {
+                    config.best_model_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--help" | "-h" => {
+                println!("TabulaShogi Autonomous Self-Improvement Loop");
+                println!("USAGE:\n    tabula-shogi loop [OPTIONS]");
+                println!("OPTIONS:");
+                println!(
+                    "    -i, --iterations <N>    Number of improvement generations [default: 3]"
+                );
+                println!(
+                    "    -g, --games <N>         Self-play games per generation [default: 50]"
+                );
+                println!(
+                    "    -p, --eval-pairs <N>    Evaluation game pairs per generation [default: 15]"
+                );
+                println!("    -t, --threads <T>       Worker threads [default: 2]");
+                println!("    -d, --depth <D>         Search depth [default: 2]");
+                println!(
+                    "    -e, --epochs <E>        NNUE training epochs per generation [default: 10]"
+                );
+                println!("        --lr <FLOAT>        Learning rate [default: 0.005]");
+                println!(
+                    "        --data <PATH>       Path to cumulative training dataset [default: loop_dataset.tsv]"
+                );
+                println!(
+                    "        --best <PATH>       Path to best model binary [default: best_nnue.bin]"
+                );
+                return;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    SelfImprovementLoop::run(&config);
+}
+
 fn print_main_help() {
     println!(
         r#"TabulaShogi {} — An Autonomous Rust Shogi Engine (Tabula Rasa)
@@ -210,6 +428,8 @@ COMMANDS:
     selfplay    Autonomous self-play generation pipeline (games, CSA, dataset)
     tune        Texel Tuning solver for evaluation parameter optimization
     train-nnue  Scratch NNUE neural network trainer (backprop + Adam)
+    match       Arena game-pair match between two models with SPRT testing
+    loop        Full autonomous self-improvement loop (selfplay -> train -> match -> promote)
     bench       Run search performance benchmark on standard positions
 
 OPTIONS:

@@ -89,7 +89,8 @@ impl SelfPlayManager {
             let data_lock = data_file.clone();
 
             let handle = thread::spawn(move || {
-                let mut engine = SearchEngine::new(cfg.tt_size_mb);
+                let mut engine =
+                    SearchEngine::new(cfg.tt_size_mb).with_eval_mode(cfg.eval_mode.clone());
                 // 各スレッドに独立した乱数シードを供給
                 let thread_seed =
                     cfg.seed ^ ((thread_id as u64 + 1).wrapping_mul(0x517cc1b727220a95));
