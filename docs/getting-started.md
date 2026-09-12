@@ -51,10 +51,12 @@ cargo build --release
 
 対局GUIのエンジン設定画面から以下のパラメータを調整できます：
 
-| オプション名 |  型  | デフォルト値 |   調整範囲   | 説明                                                                                                          |
-| :----------- | :--: | :----------: | :----------: | :------------------------------------------------------------------------------------------------------------ |
-| **USI_Hash** | spin |      64      | 1 〜 8192 MB | 置換表（探索結果のメモリキャッシュ）のサイズ。PCの搭載メモリに応じて 256 や 1024 に増やすと読みが安定します。 |
-| **Threads**  | spin |      1       |   1 〜 64    | 探索に使用する並列スレッド数。対戦ベンチマーク時は 1、本気で強くしたいときは 4 や 8 に設定します。            |
+| オプション名 | 型 | デフォルト値 | 調整範囲 | 説明 |
+| :--- | :---: | :---: | :---: | :--- |
+| **USI_Hash** | spin | 64 | 1 〜 8192 MB | 置換表（探索結果のメモリキャッシュ）のサイズ。PCの搭載メモリに応じて 256 や 1024 に増やすと読みが安定します。 |
+| **Threads** | spin | 1 | 1 〜 64 | 探索に使用する並列スレッド数（Lazy SMP）。対局時は 2〜8、ベンチマーク時は 1 を推奨。 |
+| **Eval_Type** | combo | HCE | HCE / NNUE | 評価関数の種類。HCE（手動評価関数）または NNUE（ニューラルネット）を選択。 |
+| **NNUE_File** | string | <empty> | ファイルパス | 外部の量子化 NNUE 重みバイナリ（`nnue.bin`）のパス。指定するとモデルが即座に読み込まれます。 |
 
 ---
 
@@ -67,8 +69,46 @@ cargo build --release
 usi
 # -> id name TabulaShogi 0.1.0
 # -> id author Takumi Kusumoto
+# -> option name USI_Hash type spin default 64 min 1 max 8192
+# -> option name Threads type spin default 1 min 1 max 64
+# -> option name Eval_Type type combo default HCE var HCE var NNUE
+# -> option name NNUE_File type string default <empty>
 # -> usiok
 isready
 # -> readyok
 quit
+```
+
+---
+
+## 6. 自己対局＆学習パイプラインの実行
+
+TabulaShogi は、スタンドアロン CLI ツールとして自己対局・機械学習を実行できます：
+
+### 6.1 自己対局の実行 (`selfplay`)
+
+```bash
+# 4スレッド・深さ3で100局の自己対局を実行し、CSA棋譜と学習データセットを出力
+.\target\release\tabula-shogi.exe selfplay --games 100 --threads 4 --depth 3 --csa games.csa --data train.tsv
+```
+
+### 6.2 手動評価パラメータの最適化 (`tune`)
+
+```bash
+# 自己対局データを用いて Texel Tuning (Adam) により評価パラメータを最適化
+.\target\release\tabula-shogi.exe tune --data train.tsv --epochs 50 --lr 1.0
+```
+
+### 6.3 スクラッチ NNUE の学習 (`train-nnue`)
+
+```bash
+# 自己対局データからスクラッチ NNUE ネットワークを学習し、量子化バイナリを出力
+.\target\release\tabula-shogi.exe train-nnue --data train.tsv --out nnue.bin --epochs 20 --lr 0.001
+```
+
+### 6.4 探索ベンチマークの測定 (`bench`)
+
+```bash
+# 探索ノード数および NPS (Nodes Per Second) を計測
+.\target\release\tabula-shogi.exe bench
 ```
