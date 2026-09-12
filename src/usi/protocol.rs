@@ -1,5 +1,6 @@
 use super::parse::UsiCommand;
 use crate::board::Position;
+use crate::eval::NNUEEvaluator;
 use crate::search::{SearchEngine, TimeControl};
 use std::io::{self, BufRead};
 use std::sync::Arc;
@@ -43,72 +44,103 @@ impl UsiHandler {
 
         while let Some(Ok(line)) = lines.next() {
             let cmd = UsiCommand::parse(&line);
-            match cmd {
-                UsiCommand::Usi => {
-                    println!("id name TabulaShogi {}", env!("CARGO_PKG_VERSION"));
-                    println!("id author Takumi Kusumoto");
-                    println!("option name USI_Hash type spin default 64 min 1 max 8192");
-                    println!(
-                        "option name Threads type spin default {} min 1 max 64",
-                        self.threads
-                    );
-                    println!("usiok");
-                }
-                UsiCommand::IsReady => {
-                    println!("readyok");
-                }
-                UsiCommand::SetOption { name, value } => {
-                    if name.eq_ignore_ascii_case("usi_hash") {
-                        if let Ok(mb) = value.parse::<usize>() {
-                            self.tt_size_mb = mb;
-                            self.engine = SearchEngine::new(mb);
+            if !self.process_command(cmd) {
+                break;
+            }
+        }
+    }
+
+    /// 単一のUSIコマンドを処理 (継続する場合はtrue, 終了時はfalse)
+    pub fn process_command(&mut self, cmd: UsiCommand) -> bool {
+        match cmd {
+            UsiCommand::Usi => {
+                println!("id name TabulaShogi {}", env!("CARGO_PKG_VERSION"));
+                println!("id author Takumi Kusumoto");
+                println!("option name USI_Hash type spin default 64 min 1 max 8192");
+                println!(
+                    "option name Threads type spin default {} min 1 max 64",
+                    self.threads
+                );
+                println!("option name Eval_Type type combo default HCE var HCE var NNUE");
+                println!("option name NNUE_File type string default <empty>");
+                println!("usiok");
+            }
+            UsiCommand::IsReady => {
+                println!("readyok");
+            }
+            UsiCommand::SetOption { name, value } => {
+                if name.eq_ignore_ascii_case("usi_hash") {
+                    if let Ok(mb) = value.parse::<usize>() {
+                        self.tt_size_mb = mb;
+                        let current_eval = self.engine.eval_mode.clone();
+                        self.engine = SearchEngine::new(mb).with_eval_mode(current_eval);
+                    }
+                } else if name.eq_ignore_ascii_case("threads")
+                    && let Ok(t) = value.parse::<usize>()
+                {
+                    self.threads = t.clamp(1, 64);
+                } else if name.eq_ignore_ascii_case("eval_type") {
+                    if value.eq_ignore_ascii_case("nnue") {
+                        let nnue = NNUEEvaluator::new();
+                        self.engine.eval_mode = crate::eval::EvalMode::Nnue(Arc::new(nnue));
+                        println!("info string Evaluation mode switched to NNUE (built-in)");
+                    } else {
+                        self.engine.eval_mode = crate::eval::EvalMode::Hce;
+                        println!("info string Evaluation mode switched to HCE");
+                    }
+                } else if name.eq_ignore_ascii_case("nnue_file") {
+                    match NNUEEvaluator::load_from_file(&value) {
+                        Ok(nnue) => {
+                            self.engine.eval_mode = crate::eval::EvalMode::Nnue(Arc::new(nnue));
+                            println!("info string Loaded NNUE weights from {value}");
                         }
-                    } else if name.eq_ignore_ascii_case("threads")
-                        && let Ok(t) = value.parse::<usize>()
-                    {
-                        self.threads = t.clamp(1, 64);
+                        Err(e) => {
+                            eprintln!("Error loading NNUE file '{value}': {e}");
+                        }
                     }
                 }
-                UsiCommand::UsiNewGame => {
-                    self.stop_search_if_running();
-                    self.engine.clear();
+            }
+            UsiCommand::UsiNewGame => {
+                self.stop_search_if_running();
+                self.engine.clear();
+                self.pos = Position::startpos();
+            }
+            UsiCommand::Position { sfen, moves } => {
+                self.stop_search_if_running();
+
+                if let Some(sfen_str) = sfen {
+                    match Position::from_sfen(&sfen_str) {
+                        Ok(p) => self.pos = p,
+                        Err(e) => eprintln!("Error parsing SFEN: {e}"),
+                    }
+                } else {
                     self.pos = Position::startpos();
                 }
-                UsiCommand::Position { sfen, moves } => {
-                    self.stop_search_if_running();
 
-                    if let Some(sfen_str) = sfen {
-                        match Position::from_sfen(&sfen_str) {
-                            Ok(p) => self.pos = p,
-                            Err(e) => eprintln!("Error parsing SFEN: {e}"),
-                        }
-                    } else {
-                        self.pos = Position::startpos();
-                    }
-
-                    for mv in moves {
-                        self.pos.do_move(mv);
-                    }
+                for mv in moves {
+                    self.pos.do_move(mv);
                 }
-                UsiCommand::Go(tc) => {
-                    self.start_search(tc);
-                }
-                UsiCommand::GoMate(_limit) => {
-                    self.start_mate_search();
-                }
-                UsiCommand::Stop => {
-                    self.stop_search_if_running();
-                }
-                UsiCommand::Quit => {
-                    self.stop_search_if_running();
-                    break;
-                }
-                UsiCommand::GameOver(_) => {
-                    self.stop_search_if_running();
-                }
-                UsiCommand::Eval => {
+            }
+            UsiCommand::Go(tc) => {
+                self.start_search(tc);
+            }
+            UsiCommand::GoMate(_limit) => {
+                self.start_mate_search();
+            }
+            UsiCommand::Stop => {
+                self.stop_search_if_running();
+            }
+            UsiCommand::Quit => {
+                self.stop_search_if_running();
+                return false;
+            }
+            UsiCommand::GameOver(_) => {
+                self.stop_search_if_running();
+            }
+            UsiCommand::Eval => match &self.engine.eval_mode {
+                crate::eval::EvalMode::Hce => {
                     let breakdown = crate::eval::Evaluator::evaluate_detailed(&self.pos);
-                    println!("info string --- Evaluation Breakdown ---");
+                    println!("info string --- HCE Evaluation Breakdown ---");
                     println!(
                         "info string material_board: {:+6} cp",
                         breakdown.material_board
@@ -140,9 +172,21 @@ impl UsiHandler {
                     println!("info string total:          {:+6} cp", breakdown.total);
                     println!("eval {}", breakdown.total);
                 }
-                UsiCommand::Unknown(_) => {}
-            }
+                crate::eval::EvalMode::Nnue(nnue) => {
+                    let score = nnue.evaluate(&self.pos);
+                    println!("info string --- NNUE Evaluation ---");
+                    println!("info string total:          {:+6} cp", score);
+                    println!("eval {}", score);
+                }
+            },
+            UsiCommand::Unknown(_) => {}
         }
+        true
+    }
+
+    /// 現在の評価モードを取得
+    pub fn eval_mode(&self) -> &crate::eval::EvalMode {
+        &self.engine.eval_mode
     }
 
     fn start_search(&mut self, tc: TimeControl) {
@@ -152,6 +196,7 @@ impl UsiHandler {
         let stop_flag = Arc::clone(&self.stop_flag);
         let pos = self.pos.clone();
         let num_threads = self.threads;
+        let eval_mode = self.engine.eval_mode.clone();
 
         // Astra 6 レビュー F11: 探索ごとにTTを作り直さず、対局中永続化した共有TTを再利用
         let shared_tt = Arc::clone(&self.engine.tt);
@@ -165,9 +210,10 @@ impl UsiHandler {
             let mut main_pos = pos.clone();
             let main_tc = tc;
             let main_stop = Arc::clone(&stop_flag);
+            let main_eval = eval_mode.clone();
 
             let main_handle = thread::spawn(move || {
-                let mut searcher = SearchEngine::with_shared_tt(main_tt);
+                let mut searcher = SearchEngine::with_shared_tt(main_tt).with_eval_mode(main_eval);
                 searcher.search(&mut main_pos, &main_tc, main_stop)
             });
 
@@ -178,10 +224,11 @@ impl UsiHandler {
                     let mut helper_pos = pos.clone();
                     let helper_tc = tc;
                     let helper_stop = Arc::clone(&stop_flag);
+                    let helper_eval = eval_mode.clone();
 
                     let h = thread::spawn(move || {
-                        let mut searcher = SearchEngine::with_shared_tt(helper_tt);
-                        // ヘルパーは少し深さやオーダリングにジッターを与えて異なる探索木を耕す
+                        let mut searcher =
+                            SearchEngine::with_shared_tt(helper_tt).with_eval_mode(helper_eval);
                         searcher.search_helper(&mut helper_pos, &helper_tc, helper_stop, thread_id);
                     });
                     handles.push(h);

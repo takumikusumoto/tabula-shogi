@@ -24,7 +24,8 @@ src/
 │   └── generator.rs # 移動手, 駒打ち手, 二歩/行き所なし除外, 打ち歩詰め判定
 ├── eval/            # スクラッチ評価関数
 │   ├── evaluator.rs # 駒得, PST, 玉の囲い度, 手番ボーナス, 浮き駒ペナルティ
-│   └── nnue.rs      # 完全スクラッチNNUE推論モジュール
+│   ├── nnue.rs      # 完全スクラッチNNUE推論 & 16bit整数量子化シリアライザ
+│   └── trainer.rs   # スクラッチNNUEバックプロパゲーション & Adamオプティマイザ
 ├── search/          # ゲーム木探索
 │   ├── engine.rs    # Negamax + Alpha-Beta, 反復深化, 静止探索, Null Move Pruning
 │   ├── tt.rs        # 置換表 (Transposition Table)
@@ -83,7 +84,9 @@ src/
 
 ## 4. 評価関数の設計 (スクラッチ数理モデル)
 
-外部のNNUEやOSSの学習済み重みを一切使わない、完全スクラッチの評価関数です。
+外部の学習済みモデルやOSSの重みを一切使わない、完全スクラッチのデュアル評価機構（HCE / NNUE）です。
+
+### 4.1 手動評価関数 (Hand-Crafted Evaluation: HCE)
 
 $$Score = (Material_{Black} - Material_{White}) + (PST_{Black} - PST_{White}) + (Safety_{Black} - Safety_{White}) + Tempo$$
 
@@ -96,6 +99,15 @@ $$Score = (Material_{Black} - Material_{White}) + (PST_{Black} - PST_{White}) + 
    - 自玉の周囲8マスに存在する守備駒（金・銀・成駒）の枚数と連携度を評価。
 4. **手番ボーナス (Tempo Bonus)**:
    - 手番側の主導権ボーナス (+25 cp) を付与。
+
+### 4.2 スクラッチ NNUE 評価ネットワーク (Phase 4)
+
+- **入力層**: 1,386 次元スパース特徴量（81マス × 14駒種 + 持ち駒7種 × 2色 × 18枚上限）
+- **隠れ層**: 128 ニューロン、活性化関数 ClippedReLU（$0.0 \le x \le 1.0$、推論時は整数 $0 \le x \le 127$）
+- **視点アキュムレータ**: 先手・後手双方の視点から特徴量をインクリメンタル加算
+- **出力層**: 256 入力（先手128 + 後手128）から 1 スコアを出力、センチポーンスケール変換
+- **ゼロ依存バックプロパゲーション**: Rust 標準ライブラリのみによる連鎖律微分およびスパース Adam オプティマイザ
+- **16-bit 量子化バイナリ形式 (`TABU_NN1`)**: ヘッダー（8バイトマジック + 入出力次元）+ 16bit整数重み（合計 355,604 bytes）
 
 ---
 
@@ -123,6 +135,10 @@ $$Score = (Material_{Black} - Material_{White}) + (PST_{Black} - PST_{White}) + 
 - MVV-LVA（Most Valuable Victim - Least Valuable Attacker: 捕獲される駒の価値 × 10 - 取る駒の価値）で駒取り手を優先。
 - キラー手ヒューリスティックによるベータカット手の優先。
 
+### 並列探索 (Lazy SMP)
+
+- 共有 Atomic 置換表を活用したマルチスレッド並列探索。探索ツリーに自然なジッターを与えて異なる探索領域を開拓。
+
 ---
 
 ## 6. 開発ロードマップと機能拡張
@@ -131,6 +147,9 @@ $$Score = (Material_{Black} - Material_{White}) + (PST_{Black} - PST_{White}) + 
   - スタンドアロンCLI自己対局エンジン（`tabula-shogi selfplay`）の構築。
   - 外部棋譜・重みを一切使わず、ゼロから自己対局棋譜（CSA形式 Version 2.2）および学習用データセット（TSV形式）を自動生成・蓄積。
   - Adamオプティマイザによる **Texel Tuning** ソルバー（`tabula-shogi tune`）の実装。
-- **自己対局生成データによるNNUE学習 (Phase 4)**:
-  - 自己対局で得られた数万局の棋譜データを用いたスクラッチNNUE重みの学習と自動更新ループ。
-  - 評価関数パラメータとNNUE推論のシームレスな統合。
+- **自己対局生成データによるスクラッチ NNUE 学習パイプライン (Phase 4: 完了)**:
+  - 自己対局データを用いたスクラッチ NNUE バックプロパゲーション学習器（`tabula-shogi train-nnue`）の実装。
+  - 16bit 整数量子化およびバイナリシリアライザ (`TABU_NN1`) の実装。
+  - USI オプション（`Eval_Type` / `NNUE_File`）および探索エンジンへの動的 NNUE 統合。
+- **自律的自己改善ループ (Phase 5: 次フェーズ)**:
+  - 自己対局 ➜ データ蓄積 ➜ NNUE/HCE 学習 ➜ 新世代モデル対決（勝率検定） ➜ 自動デプロイ の完全自律パイプライン化。

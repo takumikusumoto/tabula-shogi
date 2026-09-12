@@ -9,7 +9,8 @@
 
 - **完全スクラッチ＆白紙からの自己進化（Tabula Rasa Philosophy）**:
   - やねうら王、Apery、Stockfish等の外部OSSコードや探索ルーチンの流用は一切行っていません。
-  - 外部の学習済みNNUE重みファイル等に依存せず、ゼロベースで設計された駒得・Piece-Square Tables (PST)・玉の安全度・大局観（HCE）を採用。自己対局による強化学習パイプラインは Phase 3 で順次構築中。
+  - 外部の学習済みNNUE重みファイル等に依存せず、ゼロベースで設計された駒得・Piece-Square Tables (PST)・玉の安全度・大局観（HCE）およびスクラッチNNUE評価ネットワーク（1386入力 ➜ 128隠れ層 ClippedReLU ➜ 1出力、16bit整数量子化）を採用。
+  - 自己対局生成データを用いたバックプロパゲーション＆Adamオプティマイザによる強化学習・評価関数自己進化パイプラインを完全内蔵。
 - **超高速・堅牢なRust実装**:
   - 外部クレート依存ゼロ（Zero External Dependencies）。標準ライブラリのみで完結。
   - リリースビルド時で **250万〜300万 NPS (Nodes Per Second)** の超高速探索性能を実現。
@@ -19,6 +20,7 @@
   - **静止探索 (Quiescence Search)**: 駒の取り合いや成り手を重点探索し、地平線効果を抑制
   - **置換表 (Transposition Table)**: ロックフリーAtomic 64-bitパッキング、Zobrist Hash活用
   - **Move Ordering**: 置換表の手、MVV-LVA、キラー手、応手（Countermove）、歴史ヒューリスティックによる探索枝刈り効率化
+  - **マルチスレッド並列探索 (Lazy SMP)**: TT共有・探索ツリー分散によるスケーラビリティ
   - **千日手検出 (Repetition)**: 同一局面4回検知
 - **将棋ルールの厳密な実装**:
   - 王手放置・自殺手の排除
@@ -29,6 +31,7 @@
 - **USIプロトコル完全準拠**:
   - リアルタイムな `info depth ... score cp ... nodes ... nps ... pv ...` の標準出力により、ShogiHome等のGUIで読み筋や評価値グラフ、消費時間がグラフィカルに表示されます。
   - `btime`, `wtime`, `byoyomi`, `binc`, `winc` に対応した安全な時間管理（Time Manager）。
+  - `Eval_Type` (HCE / NNUE) や `NNUE_File` オプションによる動的評価エンジン切り替えに対応。
 
 ---
 
@@ -66,7 +69,10 @@ tabula-shogi selfplay --games 100 --threads 4 --depth 3 --csa games.csa --data t
 # 3. 評価関数パラメータの自己最適化 (Texel Tuning / Adam)
 tabula-shogi tune --data train.tsv --epochs 50 --lr 1.0
 
-# 4. 探索ベンチマークの実行
+# 4. 自己対局データを用いたスクラッチ NNUE バックプロパゲーション学習
+tabula-shogi train-nnue --data train.tsv --out nnue.bin --epochs 20 --lr 0.001
+
+# 5. 探索ベンチマークの実行
 tabula-shogi bench
 ```
 
@@ -86,16 +92,20 @@ tabula-shogi bench
 
 ## USIプロトコル対応コマンド一覧
 
-| コマンド                                                                    | 説明                                                                            |
-| :-------------------------------------------------------------------------- | :------------------------------------------------------------------------------ |
-| `usi`                                                                       | エンジン名・作者・設定オプションを出力し、`usiok` を返答                        |
-| `isready`                                                                   | エンジンの初期化完了を確認し、`readyok` を返答                                  |
-| `setoption name USI_Hash value <N>`                                         | 置換表（Transposition Table）のメモリサイズ（MB単位）を設定                     |
-| `usinewgame`                                                                | 新規対局開始に伴う置換表および局面履歴のクリア                                  |
-| `position [startpos \| sfen <SFEN>] moves ...`                              | 盤面局面のセットおよび着手履歴の適用                                            |
+| コマンド | 説明 |
+| :--- | :--- |
+| `usi` | エンジン名・作者・設定オプションを出力し、`usiok` を返答 |
+| `isready` | エンジンの初期化完了を確認し、`readyok` を返答 |
+| `setoption name USI_Hash value <N>` | 置換表（Transposition Table）のメモリサイズ（MB単位）を設定 |
+| `setoption name Threads value <N>` | 並列探索スレッド数を設定 (1〜64) |
+| `setoption name Eval_Type value <HCE\|NNUE>` | 評価関数モードを切り替え (HCE: 手動評価関数, NNUE: ニューラルネット) |
+| `setoption name NNUE_File value <PATH>` | 外部量子化NNUE重みバイナリ (`nnue.bin`) を読み込み |
+| `usinewgame` | 新規対局開始に伴う置換表および局面履歴のクリア |
+| `position [startpos \| sfen <SFEN>] moves ...` | 盤面局面のセットおよび着手履歴の適用 |
 | `go [btime ...] [wtime ...] [byoyomi ...] [binc ...] [winc ...] [infinite]` | 指定の時間制限・秒読みルールで探索を開始し、定期的なPV infoと `bestmove` を出力 |
-| `stop`                                                                      | 実行中の探索を即時中断し、直ちに現在の最善手を出力                              |
-| `quit`                                                                      | プロセスを安全に終了                                                            |
+| `stop` | 実行中の探索を即時中断し、直ちに現在の最善手を出力 |
+| `eval` | 現在の局面の静的評価値（HCE内訳またはNNUEスコア）を出力 |
+| `quit` | プロセスを安全に終了 |
 
 ---
 

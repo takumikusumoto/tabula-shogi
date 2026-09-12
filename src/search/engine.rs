@@ -3,7 +3,6 @@ use super::time_mgr::{TimeControl, TimeManager};
 use super::tt::{NodeType, TranspositionTable};
 use crate::board::Position;
 use crate::book::OpeningBook;
-use crate::eval::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::types::Move;
 use std::sync::Arc;
@@ -30,6 +29,7 @@ pub struct SearchEngine {
     pub(crate) killer_moves: [[Option<Move>; 2]; 64],
     pub(crate) counter_moves: [[Option<Move>; 81]; 81],
     pub(crate) history: [[i32; 81]; 81],
+    pub eval_mode: crate::eval::EvalMode,
 }
 
 impl SearchEngine {
@@ -40,6 +40,7 @@ impl SearchEngine {
             killer_moves: [[None; 2]; 64],
             counter_moves: [[None; 81]; 81],
             history: [[0; 81]; 81],
+            eval_mode: crate::eval::EvalMode::Hce,
         };
         engine.reset_heuristics();
         engine
@@ -57,9 +58,20 @@ impl SearchEngine {
             killer_moves: [[None; 2]; 64],
             counter_moves: [[None; 81]; 81],
             history: [[0; 81]; 81],
+            eval_mode: crate::eval::EvalMode::Hce,
         };
         engine.reset_heuristics();
         engine
+    }
+
+    pub fn with_eval_mode(mut self, eval_mode: crate::eval::EvalMode) -> Self {
+        self.eval_mode = eval_mode;
+        self
+    }
+
+    #[inline(always)]
+    pub fn evaluate(&self, pos: &Position) -> i32 {
+        self.eval_mode.evaluate(pos)
     }
 
     /// ヒューリスティクステーブルを全リセット
@@ -551,7 +563,7 @@ impl SearchEngine {
 
         // 静的評価値の事前計算 (王手がかかっていない場合)
         let static_eval = if !in_check {
-            Some(Evaluator::evaluate(pos))
+            Some(self.evaluate(pos))
         } else {
             None
         };
@@ -747,7 +759,7 @@ impl SearchEngine {
         }
 
         if ply >= 64 {
-            return Evaluator::evaluate(pos);
+            return self.evaluate(pos);
         }
 
         let in_check = pos.is_in_check(pos.side_to_move);
@@ -789,7 +801,7 @@ impl SearchEngine {
         }
 
         // 王手されていない通常局面: 静的評価（立合いスコア）
-        let stand_pat = Evaluator::evaluate(pos);
+        let stand_pat = self.evaluate(pos);
         if stand_pat >= beta {
             return beta;
         }
