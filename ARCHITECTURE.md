@@ -171,8 +171,51 @@ $$Score = (Material_{Black} - Material_{White}) + (PST_{Black} - PST_{White}) + 
 
 ## 7. 開発ロードマップと現在地
 
-- **Phase 1: 基本基盤（完了）**: 盤面表現、合法手生成、王手回避、打ち歩詰め判定、USI通信、HCE。
-- **Phase 2: ゲーム木探索と品質基盤（完了）**: αβ探索、PVS、反復深化、Atomic TT、Lazy SMP、df-pn詰将棋、CI/CD。
-- **Phase 3: 自己対局強化学習パイプライン（完了）**: `selfplay`（CSA v2.2/TSV）、`tune`（Texel Tuning/Adam）。
-- **Phase 4: スクラッチ NNUE 学習パイプライン（完了）**: ゼロ依存バックプロパゲーション、16bit整数量子化、USI動的切り替え。
-- **Phase 5: 自律的自己改善ループ & レーティング自動検定（完了）**: 先後ペア並列対戦アリーナ、SPRT逐次検定、自動世代交代ループ。
+```mermaid
+flowchart LR
+    P1["Phase 1<br/>基本基盤・HCE<br/>(v0.1.0 完了)"] --> P2["Phase 2<br/>ゲーム木探索・TT・SMP<br/>(完了)"]
+    P2 --> P3["Phase 3<br/>自己対局・Texel Tuning<br/>(完了)"]
+    P3 --> P4["Phase 4<br/>スクラッチNNUE学習<br/>(完了)"]
+    P4 --> P5["Phase 5<br/>アリーナ・SPRT自律ループ<br/>(基盤完了)"]
+    P5 --> P6["Phase 6<br/>大規模自己学習・重み育成<br/>(★現在進行中)"]
+    P6 --> P7["Phase 7<br/>WCSC / 電竜戦 大会出場<br/>(計画)"]
+
+    style P1 fill:#d4edda,stroke:#28a745
+    style P2 fill:#d4edda,stroke:#28a745
+    style P3 fill:#d4edda,stroke:#28a745
+    style P4 fill:#d4edda,stroke:#28a745
+    style P5 fill:#d4edda,stroke:#28a745
+    style P6 fill:#fff3cd,stroke:#ffc107,stroke-width:2px
+    style P7 fill:#f8f9fa,stroke:#6c757d
+```
+
+### 7.1 フェーズ別マイルストーン詳細
+
+- **Phase 1: 基本基盤（✅ 完了 - v0.1.0 リリース）**:
+  - 81マス盤面表現、駒の移動・打込み、王手回避手専用生成器、二歩・打ち歩詰めの厳密判定。
+  - USI プロトコル通信ループの実装、初期手動評価関数（HCE）。
+  - GitHub Actions によるマルチプラットフォーム自動ビルド＆リリースパイプラインの配備。
+- **Phase 2: ゲーム木探索と品質基盤（✅ 完了）**:
+  - Negamax + Alpha-Beta 探索、反復深化、静止探索（Quiescence Search）。
+  - Atomic ロックフリー 64-bit 置換表（TT）、SEE駒得オーダリング、キラー手・歴史ヒューリスティック。
+  - df-pn アルゴリズムによる超高速詰将棋ルーチン、Lazy SMP 並列探索、CI/CD 静的解析整備。
+- **Phase 3: 自己対局強化学習パイプライン（✅ 完了）**:
+  - スタンドアロン自己対局エンジン（`tabula-shogi selfplay`）。
+  - 標準 CSA 形式棋譜（v2.2）および学習用データセット（TSV）の自動生成・蓄積。
+  - Texel Tuning（Adam オプティマイザ）による HCE パラメータ自己最適化（`tabula-shogi tune`）。
+- **Phase 4: スクラッチ NNUE 学習パイプライン（✅ 完了）**:
+  - 外部機械学習ライブラリゼロのスクラッチ NNUE バックプロパゲーション学習器（`tabula-shogi train-nnue`）。
+  - 16bit 整数量子化バイナリシリアライザ（`TABU_NN1`、モデルサイズ 355 KB）。
+  - USI 動的切り替えオプション（`Eval_Type` / `NNUE_File`）と探索エンジンの統合。
+- **Phase 5: 自律的自己改善ループ & レーティング自動検定（✅ 完了）**:
+  - 先後交代ペアマッチ並列アリーナ（`tabula-shogi match`）。
+  - Wald の逐次確率比検定（SPRT）による統計的モデル昇格・早期打ち切り判定。
+  - 自己対局 ➜ データ蓄積 ➜ NNUE 学習 ➜ アリーナ対局 ➜ モデル昇格の完全自動ループ（`tabula-shogi loop`）。
+- **Phase 6: 大規模自律自己学習と NNUE 重みの実戦育成（🔥 現在地・進行中）**:
+  - 数千〜数万局規模の自律自己対局ループの長時間稼働。
+  - スクラッチ NNUE 重みの継続的学習と世代交代によるレーティング向上。
+  - HCE に対する有意な勝ち越しと、新旧 NNUE 世代間の勝率検定。
+- **Phase 7: 大会出場とさらなる高みへ（🚀 将来目標）**:
+  - 世界コンピュータ将棋選手権 (WCSC) / 電竜戦 への出場。
+  - LMR（Late Move Reductions）や Singular Extension 等の高度な探索枝刈り拡張。
+  - 複数マシンによる分散並列自己対局ワーカーの構築。
