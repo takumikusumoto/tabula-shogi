@@ -35,7 +35,7 @@ cargo build --release
 2. 画面右上の **「設定」** ➜ **「エンジン設定」** を開きます。
 3. **「エンジンを追加」** をクリックします。
 4. ビルドされた `tabula-shogi.exe` の絶対パスを指定します。
-5. エンジン名が自動的に **TabulaShogi 0.1.0**、作者が **Takumi Kusumoto** と認識されます。
+5. エンジン名が自動的に **TabulaShogi <version>**（例: `TabulaShogi 0.1.0`）、作者が **Takumi Kusumoto** と認識されます。
 6. 設定を保存すれば、通常の対局や検討、棋譜解析で選択可能になります。
 
 ### 将棋所（Shogidokoro）の場合
