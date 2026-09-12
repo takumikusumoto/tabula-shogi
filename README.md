@@ -51,6 +51,27 @@ cargo build --release
 
 ---
 
+## CLIモード & サブコマンド
+
+TabulaShogi は、将棋GUIからの USI エンジン起動に加えて、自律的自己対局や機械学習チューニングを実行できるスタンドアロン CLI ツールチェーンを備えています：
+
+```bash
+# 1. デフォルト: USI プロトコル通信ループ (引数なし、または 'usi')
+tabula-shogi
+tabula-shogi usi
+
+# 2. 自己対局パイプライン (CSA棋譜および学習用TSVの自動生成)
+tabula-shogi selfplay --games 100 --threads 4 --depth 3 --csa games.csa --data train.tsv
+
+# 3. 評価関数パラメータの自己最適化 (Texel Tuning / Adam)
+tabula-shogi tune --data train.tsv --epochs 50 --lr 1.0
+
+# 4. 探索ベンチマークの実行
+tabula-shogi bench
+```
+
+---
+
 ## ShogiHomeへの登録方法
 
 1. **ShogiHome** を起動します。

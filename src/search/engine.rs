@@ -75,6 +75,117 @@ impl SearchEngine {
         self.reset_heuristics();
     }
 
+    /// 自己対局用の固定深さ探索 (USI標準出力を行わず、最善手と探索スコアを返却)
+    pub fn search_fixed_depth(
+        &mut self,
+        pos: &mut Position,
+        target_depth: u8,
+    ) -> (Option<Move>, i32) {
+        // 1. 定跡データベースの照会
+        if let Some(book_move) = OpeningBook::probe(pos) {
+            let legal_moves = MoveGenerator::generate_legal_moves(pos);
+            if legal_moves.contains(&book_move) {
+                return (Some(book_move), 0);
+            }
+        }
+
+        // 2. 詰み探索 (df-pn Solver)
+        let mut dfpn = super::dfpn::DfpnSolver::new(20_000);
+        let (is_mate, mate_move) = dfpn.solve(pos);
+        if is_mate && let Some(mv) = mate_move {
+            return (Some(mv), MATE_SCORE - 1);
+        }
+
+        self.nodes = 0;
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let tc = TimeControl {
+            infinite: true,
+            ..Default::default()
+        };
+        let time_mgr = TimeManager::new(&tc, pos.side_to_move);
+        let ctx = SearchContext {
+            time_mgr: &time_mgr,
+            stop_flag: &stop_flag,
+        };
+
+        let mut root_moves = MoveGenerator::generate_legal_moves(pos);
+        if root_moves.is_empty() {
+            return (None, -MATE_SCORE);
+        }
+
+        let mut best_move = root_moves[0];
+        let mut best_score = -INF;
+
+        for depth in 1..=target_depth {
+            let mut alpha = -INF;
+            let mut beta = INF;
+
+            if depth >= 4 && best_score.abs() < MATE_SCORE - 200 {
+                alpha = (best_score - ASPIRATION_DELTA).max(-INF);
+                beta = (best_score + ASPIRATION_DELTA).min(INF);
+            }
+
+            let tt_move = self.tt.probe(pos.hash).and_then(|e| e.best_move);
+            let prev_mv = pos.history.last().map(|rec| rec.mv);
+            let counter_mv = prev_mv.and_then(|pm| {
+                pm.from()
+                    .and_then(|from_sq| self.counter_moves[from_sq.index()][pm.to().index()])
+            });
+            MoveOrderer::order_moves(
+                &mut root_moves,
+                pos,
+                tt_move,
+                &[None, None],
+                counter_mv,
+                Some(&self.history),
+            );
+
+            let mut loop_best_move = None;
+            loop {
+                let mut current_alpha = alpha;
+                for &mv in &root_moves {
+                    pos.do_move(mv);
+                    let score = -self.negamax(pos, depth - 1, -beta, -current_alpha, 1, true, &ctx);
+                    pos.undo_move();
+
+                    if score > current_alpha {
+                        current_alpha = score;
+                        loop_best_move = Some(mv);
+                    }
+                    if current_alpha >= beta {
+                        break;
+                    }
+                }
+
+                if current_alpha <= alpha {
+                    alpha = -INF;
+                } else if current_alpha >= beta {
+                    beta = INF;
+                } else {
+                    best_score = current_alpha;
+                    if let Some(bm) = loop_best_move {
+                        best_move = bm;
+                    }
+                    break;
+                }
+            }
+
+            self.tt.store(
+                pos.hash,
+                depth,
+                Self::score_to_tt(best_score, 0),
+                NodeType::Exact,
+                Some(best_move),
+            );
+
+            if best_score.abs() >= MATE_SCORE - 100 {
+                break;
+            }
+        }
+
+        (Some(best_move), best_score)
+    }
+
     /// 反復深化探索のエントリポイント
     pub fn search(
         &mut self,
