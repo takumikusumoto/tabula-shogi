@@ -106,9 +106,30 @@ TabulaShogi は、スタンドアロン CLI ツールとして自己対局・機
 .\target\release\tabula-shogi.exe train-nnue --data train.tsv --out nnue.bin --epochs 20 --lr 0.001
 ```
 
-### 6.4 探索ベンチマークの測定 (`bench`)
+### 6.4 アリーナ直接対戦＆SPRT検定 (`match`)
+
+2つの異なるモデル（HCE vs NNUE、または世代の異なる `nnue.bin` 同士）を先後交代ペアマッチで並列対戦させ、勝率および SPRT（逐次確率比検定）による統計的有意性を判定します：
 
 ```bash
-# 探索ノード数および NPS (Nodes Per Second) を計測
+# HCE と学習済み NNUE の対局検定（20ペア = 全40局、4スレッド並列、探索深さ2）
+.\target\release\tabula-shogi.exe match --engine1 HCE --engine2 nnue.bin --pairs 20 --threads 4 --depth 2
+
+# 新旧 NNUE モデル同士のレーティング直接対戦
+.\target\release\tabula-shogi.exe match --engine1 best_nnue.bin --engine2 candidate_nnue.bin --pairs 30 --threads 4 --depth 3
+```
+
+### 6.5 完全自律型自己改善ループ (`loop`)
+
+「自己対局 ➜ 学習データ蓄積 ➜ スクラッチNNUE学習 ➜ アリーナ対決検定 ➜ 勝ち越し時の自動昇格」の進化サイクルを完全自動で指定世代数繰り返します：
+
+```bash
+# 3世代の自律改善ループを実行（1世代あたり50局自己対局、15ペア検定、深さ2、4スレッド）
+.\target\release\tabula-shogi.exe loop --iterations 3 --games 50 --eval-pairs 15 --threads 4 --depth 2 --epochs 10 --best best_nnue.bin
+```
+
+### 6.6 探索ベンチマークの測定 (`bench`)
+
+```bash
+# 初期局面からの深さ6探索によるノード数および NPS (Nodes Per Second) を計測
 .\target\release\tabula-shogi.exe bench
 ```

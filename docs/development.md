@@ -31,7 +31,7 @@ TabulaShogi は **「外部のモデル・重み・定跡・棋譜を一切持�
 コミット前に必ず以下のコマンドを実行し、エラーや警告がゼロであることを確認してください：
 
 ```bash
-# 全テスト（単体テスト・統合テスト16件）の実行
+# 全テストスイート（全32件の統合・機能回帰テスト）の実行
 cargo test
 
 # 静的解析リンターの実行（警告はエラーとして扱う）
@@ -40,6 +40,13 @@ cargo clippy -- -D warnings
 # フォーマッタの確認
 cargo fmt -- --check
 ```
+
+### テストスイート構成（全32件）
+
+1. **`tests/integration_tests.rs` (16件)**: 基本将棋ルール、王手回避生成、二歩・打ち歩詰め判定、反復深化・PVS探索、置換表（TT）、SEE駒得オーダリング、df-pn詰将棋探索、USI通信プロトコル。
+2. **`tests/phase3_selfplay_tune_tests.rs` (7件)**: 自己対局生成、CSA形式棋譜シリアライズ、SFEN変換往復性、Texel Tuning（Adam）損失収束テスト。
+3. **`tests/phase4_nnue_tests.rs` (5件)**: スクラッチNNUEバックプロパゲーション学習器、16bit整数量子化、モデルバイナリ（`TABU_NN1`）読み書き往復性、USIオプション動的切り替え。
+4. **`tests/phase5_loop_tests.rs` (4件)**: アリーナ先後ペア対戦、ランダム序盤局面生成、SPRT（逐次確率比検定）対数尤度比計算、自律的自己改善ループ（`LoopPipeline`）統合テスト。
 
 ※ 本リポジトリには Pre-commit Gitフックが設定されており、コミット時に `cargo fmt -- --check` および `markdownlint-cli2` による静的検証が自動実行されます。
 
