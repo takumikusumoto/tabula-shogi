@@ -2,3 +2,8 @@
 **/*.rs.bk
 *.exe
 *.zip
+*.tar.gz
+*.bin
+*.tsv
+*.csa
+
