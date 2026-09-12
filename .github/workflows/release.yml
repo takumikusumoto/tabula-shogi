@@ -157,6 +157,12 @@ jobs:
             ./tabula-shogi
             \`\`\`
             ターミナルでのUSI直接対話、またはLinux対応将棋GUI（将棋所 Linux版等）に登録して使用できます。
+
+          ---
+
+          ## 📖 エンジンの詳細仕様とアーキテクチャ
+
+          全機能一覧、盤面設計、探索アルゴリズム、自己対局・チューニングパイプラインの詳細については、同梱の \`README.md\` および [ARCHITECTURE.md](https://github.com/takumikusumoto/tabula-shogi/blob/main/ARCHITECTURE.md) をご確認ください。
           EOF
 
       - name: Upload Release Asset
