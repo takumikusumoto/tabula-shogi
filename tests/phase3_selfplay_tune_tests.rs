@@ -106,6 +106,7 @@ fn test_selfplay_single_game_simulation() {
         data_output: None,
         tt_size_mb: 4,
         seed: 12345,
+        eval_mode: tabula_shogi::eval::EvalMode::Hce,
     };
 
     let mut engine = tabula_shogi::search::SearchEngine::new(config.tt_size_mb);
@@ -136,6 +137,7 @@ fn test_selfplay_manager_small_batch() {
         data_output: None,
         tt_size_mb: 4,
         seed: 99999,
+        eval_mode: tabula_shogi::eval::EvalMode::Hce,
     };
 
     let stats = SelfPlayManager::run(config);

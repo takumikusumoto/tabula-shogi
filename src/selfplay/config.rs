@@ -21,6 +21,8 @@ pub struct SelfPlayConfig {
     pub tt_size_mb: usize,
     /// 乱数シード値 (完全自律的乱数生成用)
     pub seed: u64,
+    /// 評価関数の動作モード (HCE または NNUE)
+    pub eval_mode: crate::eval::EvalMode,
 }
 
 impl Default for SelfPlayConfig {
@@ -36,6 +38,7 @@ impl Default for SelfPlayConfig {
             data_output: None,
             tt_size_mb: 16,
             seed: 0x9E3779B97F4A7C15, // 黄金比基底シード
+            eval_mode: crate::eval::EvalMode::Hce,
         }
     }
 }

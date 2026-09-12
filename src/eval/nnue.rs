@@ -14,7 +14,7 @@ pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN1";
 /// - 隠れ層: 128ニューロン, ClippedReLU (0..=127)
 /// - 差分アキュムレータ (Accumulator): 局面移動時の高速インクリメンタル計算
 /// - 量子化: 16-bit 整数演算（SIMDフレンドリー）
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NNUEEvaluator {
     pub(crate) feature_weights: Vec<[i16; NNUE_HIDDEN_SIZE]>,
     pub(crate) feature_biases: [i16; NNUE_HIDDEN_SIZE],

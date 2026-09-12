@@ -11,7 +11,7 @@ use crate::board::Position;
 use std::sync::Arc;
 
 /// 評価関数の動作モード
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum EvalMode {
     /// 手動評価関数 (Hand-Crafted Evaluation, デフォルト)
     #[default]

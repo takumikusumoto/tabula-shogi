@@ -72,7 +72,13 @@ tabula-shogi tune --data train.tsv --epochs 50 --lr 1.0
 # 4. 自己対局データを用いたスクラッチ NNUE バックプロパゲーション学習
 tabula-shogi train-nnue --data train.tsv --out nnue.bin --epochs 20 --lr 0.001
 
-# 5. 探索ベンチマークの実行
+# 5. アリーナ対戦＆SPRT検定（2モデル間の先後ペア並列対戦と勝率・Elo差測定）
+tabula-shogi match --engine1 hce --engine2 nnue.bin --pairs 20 --threads 4 --depth 2
+
+# 6. 完全自律型自己改善ループ（自己対局 ➜ 学習 ➜ 検定 ➜ 自動昇格）
+tabula-shogi loop --iterations 3 --games 50 --eval-pairs 15 --threads 4 --depth 2
+
+# 7. 探索ベンチマークの実行
 tabula-shogi bench
 ```
 
