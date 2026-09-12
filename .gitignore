@@ -7,4 +7,6 @@
 *.tsv
 *.csa
 *.log
+*.err
+output/
 

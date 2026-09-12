@@ -20,6 +20,7 @@
     "target/**",
     ".artifacts/**",
     "node_modules/**",
-    "AGENTS.md"
+    "AGENTS.md",
+    "output/**"
   ]
 }
