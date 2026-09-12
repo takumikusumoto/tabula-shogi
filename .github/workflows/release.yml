@@ -74,6 +74,10 @@ jobs:
           tar -czf "$PKG_NAME.tar.gz" -C "$PKG_NAME" .
           echo "ASSET_PATH=$PKG_NAME.tar.gz" >> $GITHUB_ENV
 
+      - name: Initialize release notes placeholder
+        shell: bash
+        run: touch release_notes.md
+
       - name: Generate Release Notes
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -114,53 +118,52 @@ jobs:
             CHANGELOG="${CHANGELOG}\n### 🔧 開発基盤・その他 (Chores)\n${CHORES}\n"
           fi
 
-          cat <<EOF > release_notes.md
-## 概要
+          cat <<EOF | sed 's/^          //' > release_notes.md
+          ## 概要
 
-TabulaShogi $TAG のリリースです。
-外部の学習済みモデル・評価重み・定跡バイナリ・他将棋OSSの探索コードに一切依存せず、完全スクラッチで実装されたUSI対応将棋エンジンです。
+          TabulaShogi $TAG のリリースです。
+          外部の学習済みモデル・評価重み・定跡バイナリ・他将棋OSSの探索コードに一切依存せず、完全スクラッチで実装されたUSI対応将棋エンジンです。
 
----
+          ---
 
-## 主な変更点 ($DIFF_TITLE)
-$(echo -e "$CHANGELOG")
+          ## 主な変更点 ($DIFF_TITLE)
+          $(echo -e "$CHANGELOG")
 
----
+          ---
 
-## 配布物（Assets）の構成
+          ## 配布物（Assets）の構成
 
-本リリースでは、Rust開発環境不要で将棋GUI（ShogiGUI、将棋所など）から直接ご利用いただける **Windows用** および **Linux（Ubuntu）用** のコンパイル済みパッケージを配布しています。
+          本リリースでは、Rust開発環境不要で将棋GUI（ShogiGUI、将棋所など）から直接ご利用いただける **Windows用** および **Linux（Ubuntu）用** のコンパイル済みパッケージを配布しています。
 
-### Windows向け (\`tabula-shogi-$TAG-windows-x86_64.zip\`)
-\`\`\`text
-tabula-shogi-$TAG-windows-x86_64.zip
-├── tabula-shogi.exe   # USI対応将棋思考エンジンの実行バイナリ（最適化ビルド済み）
-├── README.md          # 概要・USI GUIへのエンジン登録方法・使い方
-└── LICENSE            # MITライセンス表示
-\`\`\`
-- **使い方**: ZIPを解凍後、ShogiGUI等の「エンジン設定」から \`tabula-shogi.exe\` を登録して対局・検討を開始できます。
+          ### Windows向け (\`tabula-shogi-$TAG-windows-x86_64.zip\`)
+          \`\`\`text
+          tabula-shogi-$TAG-windows-x86_64.zip
+          ├── tabula-shogi.exe   # USI対応将棋思考エンジンの実行バイナリ（最適化ビルド済み）
+          ├── README.md          # 概要・USI GUIへのエンジン登録方法・使い方
+          └── LICENSE            # MITライセンス表示
+          \`\`\`
+          - **使い方**: ZIPを解凍後、ShogiGUI等の「エンジン設定」から \`tabula-shogi.exe\` を登録して対局・検討を開始できます。
 
-### Linux（Ubuntu）向け (\`tabula-shogi-$TAG-linux-x86_64.tar.gz\`)
-\`\`\`text
-tabula-shogi-$TAG-linux-x86_64.tar.gz
-├── tabula-shogi       # Linux向け実行バイナリ（実行権限付き）
-├── README.md
-└── LICENSE
-\`\`\`
-- **使い方**:
-  \`\`\`bash
-  tar -xzf tabula-shogi-$TAG-linux-x86_64.tar.gz
-  ./tabula-shogi
-  \`\`\`
-  ターミナルでのUSI直接対話、またはLinux対応将棋GUI（将棋所 Linux版等）に登録して使用できます。
-EOF
-          echo "BODY_ARG=release_notes.md" >> $GITHUB_ENV
+          ### Linux（Ubuntu）向け (\`tabula-shogi-$TAG-linux-x86_64.tar.gz\`)
+          \`\`\`text
+          tabula-shogi-$TAG-linux-x86_64.tar.gz
+          ├── tabula-shogi       # Linux向け実行バイナリ（実行権限付き）
+          ├── README.md
+          └── LICENSE
+          \`\`\`
+          - **使い方**:
+            \`\`\`bash
+            tar -xzf tabula-shogi-$TAG-linux-x86_64.tar.gz
+            ./tabula-shogi
+            \`\`\`
+            ターミナルでのUSI直接対話、またはLinux対応将棋GUI（将棋所 Linux版等）に登録して使用できます。
+          EOF
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag_name }}
           files: ${{ env.ASSET_PATH }}
-          body_path: ${{ env.BODY_ARG }}
+          body_path: release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
