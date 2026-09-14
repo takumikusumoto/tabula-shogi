@@ -91,17 +91,20 @@ impl SelfImprovementLoop {
         for iter in 1..=config.iterations {
             println!("\n>>> Generation {} / {} <<<", iter, config.iterations);
 
-            // Step 1: 自己対局データ生成
+            // Step 1: 自己対局データ生成 (世代ごとにシードを多様化して局面重複を解消)
             println!(
                 "\n--- Step 1: Self-Play Data Generation ({} games) ---",
                 config.games_per_iteration
             );
+            let gen_seed =
+                0x9E3779B97F4A7C15u64.wrapping_add((iter as u64).wrapping_mul(0x517cc1b727220a95));
             let sp_cfg = SelfPlayConfig {
                 num_games: config.games_per_iteration,
                 threads: config.threads,
                 depth: config.depth,
                 data_output: Some(config.data_path.clone()),
                 eval_mode: current_best_eval.clone(),
+                seed: gen_seed,
                 ..Default::default()
             };
             SelfPlayManager::run(sp_cfg);
@@ -171,11 +174,12 @@ impl SelfImprovementLoop {
             );
 
             if !promoted {
-                // 昇格しなかった場合: チャンピオンの重みに復元（悪化方向へのドリフト防止）
-                trainer = match &current_best_eval {
-                    EvalMode::Nnue(best_nnue) => NNUETrainer::from_evaluator(best_nnue),
-                    EvalMode::Hce => NNUETrainer::new(),
-                };
+                // 昇格しなかった場合:
+                // 王者がHCEの間はCandidateの学習進捗とAdam状態を絶対に破棄せず蓄積を継続する！
+                println!(
+                    "[Progression] Candidate did not beat champion in Gen {iter}. Retaining trained weights & Adam momentum for Gen {}.",
+                    iter + 1
+                );
             }
         }
 
