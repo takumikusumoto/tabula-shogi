@@ -7,11 +7,13 @@ pub const NNUE_HIDDEN_SIZE: usize = 128; // 超高速推論のため128ノード
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_ADDEND: u64 = 1;
 
-pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN3";
+pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN4";
 
-/// スクラッチ設計の NNUE 評価ネットワーク
+/// スクラッチ設計の Residual Baseline NNUE 評価ネットワーク
+/// - ベースライン: 完全な盤上・持ち駒の駒割り (Material Balance)
+/// - 残差ネットワーク: 配置・玉の堅さ・手番等の高度な評価 (Residual)
 /// - 入力特徴量: 玉および全盤上駒(自軍14+敵軍14)・持ち駒の多次元スパース表現 (2520次元)
-/// - 隠れ層: 128ニューロン, ClippedReLU (0..=127)
+/// - 隠れ層: 128ニューロン, ClippedReLU (0..=64)
 /// - 差分アキュムレータ (Accumulator): 局面移動時の高速インクリメンタル計算
 /// - 量子化: 16-bit 整数演算（SIMDフレンドリー）
 #[derive(Clone, Debug)]
@@ -29,34 +31,26 @@ impl Default for NNUEEvaluator {
 }
 
 impl NNUEEvaluator {
-    /// 外部データを使わず、将棋のドメイン知識に基づく初期重みマトリックスを生成
+    /// 残差ベースライン方式に基づく健全な初期化
+    /// - 初期出力重み/バイアス: 0 (初期状態の評価値は 100% 正確な駒割りに一致)
+    /// - 隠れ層バイアス: 32 (リニア活性領域 [0, 64] の中心に配置し、死滅ニューロンゼロを保証)
+    /// - 特徴量重み: {-1, 0, +1} の多様な決定論的サンプリング (相関を崩し学習準備)
     pub fn new() -> Self {
         let mut feature_weights = vec![[0i16; NNUE_HIDDEN_SIZE]; NNUE_INPUT_SIZE];
-        let feature_biases = [0i16; NNUE_HIDDEN_SIZE];
-        let mut output_weights = [0i16; NNUE_HIDDEN_SIZE * 2];
+        let feature_biases = [32i16; NNUE_HIDDEN_SIZE];
+        let output_weights = [0i16; NNUE_HIDDEN_SIZE * 2];
         let output_bias = 0i32;
 
-        // ドメイン知識（マテリアル・配置幾何学）からゼロスクラッチで初期特徴量重みを数学的に投影
         for (feat, weights_slice) in feature_weights.iter_mut().enumerate() {
-            let pseudo_rand = ((feat as u64)
-                .wrapping_mul(LCG_MULTIPLIER)
-                .wrapping_add(LCG_ADDEND)
-                >> 33) as i32;
-            let base_val = (pseudo_rand % 60) - 30; // -30..+30
             for (i, w) in weights_slice.iter_mut().enumerate() {
-                let node_mod = ((i as i32 * 7 + feat as i32 * 13) % 25) - 12;
-                *w = (base_val + node_mod).clamp(-127, 127) as i16;
+                // 周期性のない多様なサンプリング (-1, 0, +1)
+                let h = ((feat as u64)
+                    .wrapping_mul(LCG_MULTIPLIER)
+                    .wrapping_add((i as u64).wrapping_mul(0x9e3779b97f4a7c15))
+                    .wrapping_add(LCG_ADDEND)
+                    >> 33) as i32;
+                *w = ((h % 3) - 1) as i16;
             }
-        }
-
-        for (i, w) in output_weights.iter_mut().enumerate() {
-            *w = if i < NNUE_HIDDEN_SIZE {
-                // 先手アキュムレータ側
-                16 + (i as i16 % 16)
-            } else {
-                // 後手アキュムレータ側
-                -(16 + (i as i16 % 16))
-            };
         }
 
         NNUEEvaluator {
@@ -261,8 +255,69 @@ impl NNUEEvaluator {
         acc
     }
 
+    /// 先手視点のマテリアル（駒割り）バランスを計算 (センチポーン単位)
+    /// 玉(King)は詰み探索側で処理されるため除外
+    pub fn material_black(pos: &Position) -> i32 {
+        let mut mat = 0;
+        for piece in pos.board.iter().flatten() {
+            if piece.piece_type != PieceType::King {
+                let val = piece.piece_type.base_value();
+                match piece.color {
+                    Color::Black => mat += val,
+                    Color::White => mat -= val,
+                }
+            }
+        }
+        for pt in PieceType::HAND_PIECES {
+            if let Some(h_idx) = pt.hand_index() {
+                let b_count = pos.hand[Color::Black.index()][h_idx] as i32;
+                let w_count = pos.hand[Color::White.index()][h_idx] as i32;
+                mat += (b_count - w_count) * pt.base_value();
+            }
+        }
+        mat
+    }
+
+    /// 特徴量インデックス列から先手視点のマテリアルバランスを復元
+    /// (盤面 Position が直接利用できない場合のフォールバック・検証用)
+    pub fn material_from_features(black_feats: &[usize]) -> i32 {
+        let mut mat = 0;
+        for &f in black_feats {
+            if f < 81 * 28 {
+                // 盤上駒
+                let piece_idx = f % 28;
+                let is_self = piece_idx < 14;
+                let pt_idx = if is_self { piece_idx } else { piece_idx - 14 };
+                let pt = PieceType::ALL[pt_idx];
+                if pt != PieceType::King {
+                    let val = pt.base_value();
+                    if is_self {
+                        mat += val;
+                    } else {
+                        mat -= val;
+                    }
+                }
+            } else if f < NNUE_INPUT_SIZE {
+                // 持ち駒
+                let hand_offset = f - 81 * 28;
+                let hand_slot = hand_offset / 18;
+                let is_self = hand_slot < 7;
+                let h_idx = if is_self { hand_slot } else { hand_slot - 7 };
+                let pt = PieceType::HAND_PIECES[h_idx];
+                let val = pt.base_value();
+                if is_self {
+                    mat += val;
+                } else {
+                    mat -= val;
+                }
+            }
+        }
+        mat
+    }
+
     /// 評価値の推論 (Forward inference)
     /// 戻り値: センチポーン (cp) 単位の評価値 (手番視点)
+    /// 評価値 = 駒割りベースライン + NNUE 残差 (Residual)
     pub fn evaluate(&self, pos: &Position) -> i32 {
         let black_feats = Self::extract_features(pos, Color::Black);
         let white_feats = Self::extract_features(pos, Color::White);
@@ -283,11 +338,12 @@ impl NNUEEvaluator {
 
         // 整数スケーリング: 重み項 (64 * 64) とバイアス項 (4096) を 16 で割ることで
         // Float 学習側 (score = output * 256.0) と数学的に 1 対 1 で完全一致
-        let cp = output / 16;
+        let residual_cp = output / 16;
+        let black_score = Self::material_black(pos) + residual_cp;
 
         match pos.side_to_move {
-            Color::Black => cp,
-            Color::White => -cp,
+            Color::Black => black_score,
+            Color::White => -black_score,
         }
     }
 }

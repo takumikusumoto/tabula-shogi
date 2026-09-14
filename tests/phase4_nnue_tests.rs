@@ -14,7 +14,7 @@ fn test_nnue_roundtrip_and_serialization() {
 
     // 8 (magic) + 4 (input_size) + 4 (hidden_size) + 2520*128*2 + 128*2 + 256*2 + 4 = 645,908 bytes
     assert_eq!(bytes.len(), 645_908);
-    assert_eq!(&bytes[0..8], b"TABU_NN3");
+    assert_eq!(&bytes[0..8], b"TABU_NN4");
 
     // デシリアライズ検証
     let restored = NNUEEvaluator::from_bytes(&bytes).expect("Deserialization should succeed");
@@ -49,19 +49,16 @@ fn test_nnue_quantization() {
     let pos = Position::startpos();
     let score_int = nnue.evaluate(&pos);
 
-    // Float 推論側のスコア
+    // Float 推論側のスコア (駒割りベースライン + 残差)
     let b_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::Black);
     let w_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::White);
-    let (score_float, _, _, _, _) = trainer.forward(&b_feats, &w_feats);
+    let (res_float, _, _, _, _) = trainer.forward(&b_feats, &w_feats);
+    let mat_black = NNUEEvaluator::material_black(&pos);
+    let score_float = mat_black as f32 + res_float;
 
-    // 初期重みでの初期局面評価値は有限値
-    assert!(score_int.abs() < 10_000);
-    // 量子化誤差を考慮しても両者の符号とオーダーが一致すること（乖離が許容範囲内）を検証
-    let diff = (score_int as f32 - score_float).abs();
-    assert!(
-        diff < 30.0,
-        "Float vs Int inference discrepancy too large: float={score_float}, int={score_int}, diff={diff}"
-    );
+    // 初期重みでの初期局面評価値は有限値 (駒割りが等しいので 0)
+    assert_eq!(score_int, 0);
+    assert_eq!(score_float, 0.0);
 
     // 初期局面の対称性に頼らない非対称局面での厳密な一致検証
     let asym_pos =
@@ -72,15 +69,137 @@ fn test_nnue_quantization() {
         NNUEEvaluator::extract_features(&asym_pos, tabula_shogi::types::Color::Black);
     let asym_w_feats =
         NNUEEvaluator::extract_features(&asym_pos, tabula_shogi::types::Color::White);
-    let (asym_score_float_raw, _, _, _, _) = trainer.forward(&asym_b_feats, &asym_w_feats);
+    let (asym_res_float_raw, _, _, _, _) = trainer.forward(&asym_b_feats, &asym_w_feats);
+    let asym_mat_black = NNUEEvaluator::material_black(&asym_pos);
+    let asym_score_black_float = asym_mat_black as f32 + asym_res_float_raw;
     let asym_score_float = match asym_pos.side_to_move {
-        tabula_shogi::types::Color::Black => asym_score_float_raw,
-        tabula_shogi::types::Color::White => -asym_score_float_raw,
+        tabula_shogi::types::Color::Black => asym_score_black_float,
+        tabula_shogi::types::Color::White => -asym_score_black_float,
     };
     let asym_diff = (asym_score_int as f32 - asym_score_float).abs();
     assert!(
-        asym_diff < 50.0,
+        asym_diff < 1.0,
         "Asymmetric Float vs Int discrepancy too large: float={asym_score_float}, int={asym_score_int}, diff={asym_diff}"
+    );
+}
+
+#[test]
+fn test_nnue_residual_material_exactness() {
+    let nnue = NNUEEvaluator::new();
+    let pos_start = Position::startpos();
+    let start_eval = nnue.evaluate(&pos_start);
+    assert_eq!(start_eval, 0, "Initial position material balance must be 0");
+
+    // 1. 先手の歩を取り除き後手の持ち駒へ移動 (歩損: -100 * 2 = -200 cp)
+    let mut pos_pawn_loss = pos_start.clone();
+    let pawn_sq = pos_pawn_loss
+        .board
+        .iter()
+        .position(|p| {
+            p.is_some_and(|v| {
+                v.color == tabula_shogi::types::Color::Black
+                    && v.piece_type == tabula_shogi::types::PieceType::Pawn
+            })
+        })
+        .unwrap();
+    pos_pawn_loss.board[pawn_sq] = None;
+    pos_pawn_loss.hand[tabula_shogi::types::Color::White.index()][0] += 1; // 後手持ち歩+1
+    let pawn_eval = nnue.evaluate(&pos_pawn_loss);
+    assert_eq!(
+        pawn_eval, -200,
+        "Losing pawn into opponent hand must be exactly -200 cp"
+    );
+
+    // 2. 先手の銀を取り除き後手の持ち駒へ移動 (銀損: -500 * 2 = -1000 cp)
+    let mut pos_silver_loss = pos_start.clone();
+    let silver_sq = pos_silver_loss
+        .board
+        .iter()
+        .position(|p| {
+            p.is_some_and(|v| {
+                v.color == tabula_shogi::types::Color::Black
+                    && v.piece_type == tabula_shogi::types::PieceType::Silver
+            })
+        })
+        .unwrap();
+    pos_silver_loss.board[silver_sq] = None;
+    pos_silver_loss.hand[tabula_shogi::types::Color::White.index()][3] += 1;
+    let silver_eval = nnue.evaluate(&pos_silver_loss);
+    assert_eq!(
+        silver_eval, -1000,
+        "Losing silver into opponent hand must be exactly -1000 cp"
+    );
+
+    // 3. 先手の角を取り除き後手の持ち駒へ移動 (角損: -850 * 2 = -1700 cp)
+    let mut pos_bishop_loss = pos_start.clone();
+    let bishop_sq = pos_bishop_loss
+        .board
+        .iter()
+        .position(|p| {
+            p.is_some_and(|v| {
+                v.color == tabula_shogi::types::Color::Black
+                    && v.piece_type == tabula_shogi::types::PieceType::Bishop
+            })
+        })
+        .unwrap();
+    pos_bishop_loss.board[bishop_sq] = None;
+    pos_bishop_loss.hand[tabula_shogi::types::Color::White.index()][5] += 1;
+    let bishop_eval = nnue.evaluate(&pos_bishop_loss);
+    assert_eq!(
+        bishop_eval, -1700,
+        "Losing bishop into opponent hand must be exactly -1700 cp"
+    );
+
+    // 4. 先手の飛車を取り除き後手の持ち駒へ移動 (飛車損: -1000 * 2 = -2000 cp)
+    let mut pos_rook_loss = pos_start.clone();
+    let rook_sq = pos_rook_loss
+        .board
+        .iter()
+        .position(|p| {
+            p.is_some_and(|v| {
+                v.color == tabula_shogi::types::Color::Black
+                    && v.piece_type == tabula_shogi::types::PieceType::Rook
+            })
+        })
+        .unwrap();
+    pos_rook_loss.board[rook_sq] = None;
+    pos_rook_loss.hand[tabula_shogi::types::Color::White.index()][6] += 1;
+    let rook_eval = nnue.evaluate(&pos_rook_loss);
+    assert_eq!(
+        rook_eval, -2000,
+        "Losing rook into opponent hand must be exactly -2000 cp"
+    );
+}
+
+#[test]
+fn test_nnue_hidden_bias_gradient_update() {
+    let mut trainer = NNUETrainer::new();
+    let initial_bias = trainer.feature_biases[0];
+
+    // 1サンプルのバッチで学習を実行
+    let pos = Position::startpos();
+    let b_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::Black);
+    let w_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::White);
+    let mat_black = NNUEEvaluator::material_black(&pos);
+
+    // 出力層重みを非ゼロにして勾配を通す
+    trainer.output_weights[0] = 0.5;
+
+    // 白番で先手大優勢(1.0)のサンプルを与えることで勾配を発生させる
+    let batch = vec![(
+        b_feats,
+        w_feats,
+        mat_black,
+        tabula_shogi::types::Color::Black,
+        1.0,
+    )];
+    let _loss = trainer.train_batch(&batch, 0.05, 400.0);
+
+    // feature_biases[0] が更新されたことを検証 (以前は actual_update = 0 でバグっていた)
+    assert!(
+        (trainer.feature_biases[0] - initial_bias).abs() > 1e-6,
+        "feature_biases must be updated by Adam, got initial={initial_bias}, new={}",
+        trainer.feature_biases[0]
     );
 }
 
