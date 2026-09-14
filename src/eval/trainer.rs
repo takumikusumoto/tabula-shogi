@@ -28,10 +28,9 @@ impl Default for NNUETrainer {
 }
 
 impl NNUETrainer {
-    pub fn new() -> Self {
-        let initial_eval = NNUEEvaluator::new();
+    pub fn from_evaluator(eval: &NNUEEvaluator) -> Self {
         let mut feature_weights = Vec::with_capacity(NNUE_INPUT_SIZE);
-        for row in &initial_eval.feature_weights {
+        for row in &eval.feature_weights {
             let mut f_row = [0.0f32; NNUE_HIDDEN_SIZE];
             for (w, &q) in f_row.iter_mut().zip(row.iter()) {
                 *w = q as f32 / 64.0;
@@ -40,22 +39,16 @@ impl NNUETrainer {
         }
 
         let mut feature_biases = [0.0f32; NNUE_HIDDEN_SIZE];
-        for (b, &q) in feature_biases
-            .iter_mut()
-            .zip(initial_eval.feature_biases.iter())
-        {
+        for (b, &q) in feature_biases.iter_mut().zip(eval.feature_biases.iter()) {
             *b = q as f32 / 64.0;
         }
 
         let mut output_weights = [0.0f32; NNUE_HIDDEN_SIZE * 2];
-        for (w, &q) in output_weights
-            .iter_mut()
-            .zip(initial_eval.output_weights.iter())
-        {
+        for (w, &q) in output_weights.iter_mut().zip(eval.output_weights.iter()) {
             *w = q as f32 / 64.0;
         }
 
-        let output_bias = initial_eval.output_bias as f32 / 256.0;
+        let output_bias = eval.output_bias as f32 / 4096.0;
 
         NNUETrainer {
             feature_weights,
@@ -71,6 +64,11 @@ impl NNUETrainer {
             beta1_pow: 1.0,
             beta2_pow: 1.0,
         }
+    }
+
+    pub fn new() -> Self {
+        let initial_eval = NNUEEvaluator::new();
+        Self::from_evaluator(&initial_eval)
     }
 
     /// フォワードパス

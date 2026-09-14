@@ -83,6 +83,11 @@ impl SelfImprovementLoop {
             EvalMode::Hce
         };
 
+        let mut trainer = match &current_best_eval {
+            EvalMode::Nnue(best_nnue) => NNUETrainer::from_evaluator(best_nnue),
+            EvalMode::Hce => NNUETrainer::new(),
+        };
+
         for iter in 1..=config.iterations {
             println!("\n>>> Generation {} / {} <<<", iter, config.iterations);
 
@@ -95,15 +100,14 @@ impl SelfImprovementLoop {
                 num_games: config.games_per_iteration,
                 threads: config.threads,
                 depth: config.depth,
-                random_opening_plies: 8,
                 data_output: Some(config.data_path.clone()),
                 eval_mode: current_best_eval.clone(),
                 ..Default::default()
             };
             SelfPlayManager::run(sp_cfg);
 
-            // Step 2: データセット読込 & スクラッチ NNUE 学習
-            println!("\n--- Step 2: Training Candidate Model from Dataset ---");
+            // Step 2: データセット読込 & 継続(Warm-start) NNUE 学習
+            println!("\n--- Step 2: Training Candidate Model from Dataset (Warm-start) ---");
             let dataset = match DatasetHandler::load_from_file(&config.data_path) {
                 Ok(d) if !d.is_empty() => d,
                 _ => {
@@ -117,7 +121,6 @@ impl SelfImprovementLoop {
                 config.epochs
             );
 
-            let mut trainer = NNUETrainer::new();
             let (candidate_eval, init_loss, final_loss) =
                 trainer.train_dataset(&dataset, config.epochs, config.lr, config.batch_size, 400.0);
 
@@ -159,13 +162,21 @@ impl SelfImprovementLoop {
             let match_res = MatchRunner::run_match(&match_cfg);
 
             // Step 4: 昇格判定
-            Self::handle_promotion(
+            let promoted = Self::handle_promotion(
                 iter,
                 &match_res,
                 &candidate_eval,
                 &mut current_best_eval,
                 &config.best_model_path,
             );
+
+            if !promoted {
+                // 昇格しなかった場合: チャンピオンの重みに復元（悪化方向へのドリフト防止）
+                trainer = match &current_best_eval {
+                    EvalMode::Nnue(best_nnue) => NNUETrainer::from_evaluator(best_nnue),
+                    EvalMode::Hce => NNUETrainer::new(),
+                };
+            }
         }
 
         println!("\n============================================================");
@@ -180,7 +191,7 @@ impl SelfImprovementLoop {
         candidate_eval: &NNUEEvaluator,
         current_best_eval: &mut EvalMode,
         best_model_path: &str,
-    ) {
+    ) -> bool {
         // 昇格条件: SPRT が Pass（統計的有意に強い）、または固定対局数終了時に勝率55%超
         let sprt_passed = match_res
             .sprt
@@ -209,6 +220,7 @@ impl SelfImprovementLoop {
                 *current_best_eval = EvalMode::Nnue(Arc::new(candidate_eval.clone()));
                 println!("Successfully promoted and updated '{}'!", best_model_path);
             }
+            true
         } else {
             println!(
                 "\n>>> [REJECTED] Gen {} Candidate did not surpass Best Model ({:.1}% win rate, Elo {:+.1}). Keeping existing best. <<<",
@@ -216,6 +228,7 @@ impl SelfImprovementLoop {
                 match_res.win_rate_a * 100.0,
                 match_res.elo_diff_a
             );
+            false
         }
     }
 }

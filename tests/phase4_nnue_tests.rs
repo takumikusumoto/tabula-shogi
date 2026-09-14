@@ -197,3 +197,37 @@ fn test_usi_eval_type_and_options() {
 
     let _ = fs::remove_file(temp_path);
 }
+
+#[test]
+fn test_nnue_trainer_from_evaluator_warm_start() {
+    let pos0 = Position::startpos();
+    let dataset = vec![DatasetEntry {
+        sfen: pos0.to_sfen(),
+        score: 150,
+        result: 1.0,
+        move_usi: "7g7f".to_string(),
+    }];
+
+    // 世代1の学習
+    let mut trainer1 = NNUETrainer::new();
+    let (eval_gen1, init_loss1, final_loss1) = trainer1.train_dataset(&dataset, 10, 0.05, 1, 400.0);
+    assert!(final_loss1 < init_loss1);
+
+    // 世代2のWarm-start (世代1の学習済み重みを引き継ぐ)
+    let mut trainer2 = NNUETrainer::from_evaluator(&eval_gen1);
+    let (eval_gen2, init_loss2, final_loss2) = trainer2.train_dataset(&dataset, 10, 0.05, 1, 400.0);
+
+    // Warm-start のため、世代2の初期損失は世代1の初期損失よりも大幅に低いはず
+    assert!(
+        init_loss2 < init_loss1,
+        "Warm-start initial loss ({init_loss2}) should be lower than scratch initial loss ({init_loss1})"
+    );
+    assert!(final_loss2 <= init_loss2);
+
+    let score1 = eval_gen1.evaluate(&pos0);
+    let score2 = eval_gen2.evaluate(&pos0);
+    assert!(
+        score2 >= score1,
+        "Score should further improve: {score1} -> {score2}"
+    );
+}
