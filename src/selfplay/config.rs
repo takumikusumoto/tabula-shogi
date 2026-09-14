@@ -23,6 +23,8 @@ pub struct SelfPlayConfig {
     pub seed: u64,
     /// 評価関数の動作モード (HCE または NNUE)
     pub eval_mode: crate::eval::EvalMode,
+    /// ソフトマックス温度サンプリングを行う手数上限 (これ以降は決定論的最善手)
+    pub temperature_plies: usize,
 }
 
 impl Default for SelfPlayConfig {
@@ -39,6 +41,7 @@ impl Default for SelfPlayConfig {
             tt_size_mb: 16,
             seed: 0x9E3779B97F4A7C15, // 黄金比基底シード
             eval_mode: crate::eval::EvalMode::Hce,
+            temperature_plies: 24,
         }
     }
 }

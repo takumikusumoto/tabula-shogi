@@ -136,7 +136,7 @@ impl GameRunner {
             let current_side = pos.side_to_move;
 
             // 4. 着手の決定
-            let (chosen_move, score) = if pos.ply <= config.random_opening_plies {
+            let (chosen_move, score) = if pos.ply <= config.temperature_plies {
                 // 序盤の多様性確保: まず定跡ツリーから確率サンプリング
                 let book_sample = OpeningBook::probe_sample(&pos, rng.next_u64() as u32);
                 if let Some(bm) = book_sample
@@ -144,10 +144,26 @@ impl GameRunner {
                 {
                     (bm, 0)
                 } else {
-                    // 定跡外の場合はランダム着手
-                    let idx = rng.gen_range(legal_moves.len());
-                    let mv = legal_moves[idx];
-                    (mv, 0)
+                    // 定跡外の場合は温度付きソフトマックスサンプリング (ボルツマン探査)
+                    // 1〜10手目: T = 1.0 (有力手の中で柔軟に分岐)
+                    // 11〜temperature_plies: T = 0.6 (上位2〜3手の最善手筋に絞って揺らぐ)
+                    let temp = if pos.ply <= 10 { 1.0 } else { 0.6 };
+                    let (t_mv, t_score) = engine.search_with_temperature(
+                        &mut pos,
+                        config.depth,
+                        temp,
+                        rng.next_u64(),
+                    );
+                    match t_mv {
+                        Some(mv) => (mv, t_score),
+                        None => {
+                            result = match current_side {
+                                Color::Black => GameResult::WhiteWin(GameEndReason::Resignation),
+                                Color::White => GameResult::BlackWin(GameEndReason::Resignation),
+                            };
+                            break;
+                        }
+                    }
                 }
             } else {
                 // 探索による最善手
@@ -165,8 +181,8 @@ impl GameRunner {
                 }
             };
 
-            // 5. 投了判定 (2手連続で極端な劣勢)
-            if score <= config.resign_threshold && pos.ply > config.random_opening_plies {
+            // 5. 投了判定 (2手連続で極端な劣勢、序盤・温度サンプリング期間外)
+            if score <= config.resign_threshold && pos.ply > config.temperature_plies {
                 match current_side {
                     Color::Black => consecutive_low_eval_black += 1,
                     Color::White => consecutive_low_eval_white += 1,

@@ -198,6 +198,100 @@ impl SearchEngine {
         (Some(best_move), best_score)
     }
 
+    /// 各合法手の浅い探索評価値に基づき、ソフトマックス温度サンプリングによって着手を選択する
+    pub fn search_with_temperature(
+        &mut self,
+        pos: &mut Position,
+        target_depth: u8,
+        temperature: f32,
+        rng_seed: u64,
+    ) -> (Option<Move>, i32) {
+        // 1. 詰み探索 (df-pn Solver) の即時判定
+        let mut dfpn = super::dfpn::DfpnSolver::new(20_000);
+        let (is_mate, mate_move) = dfpn.solve(pos);
+        if is_mate && let Some(mv) = mate_move {
+            return (Some(mv), MATE_SCORE - 1);
+        }
+
+        let legal_moves = MoveGenerator::generate_legal_moves(pos);
+        if legal_moves.is_empty() {
+            return (None, -MATE_SCORE);
+        }
+
+        if legal_moves.len() == 1 || temperature <= 0.01 {
+            return self.search_fixed_depth(pos, target_depth);
+        }
+
+        self.nodes = 0;
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let tc = TimeControl {
+            infinite: true,
+            ..Default::default()
+        };
+        let time_mgr = TimeManager::new(&tc, pos.side_to_move);
+        let ctx = SearchContext {
+            time_mgr: &time_mgr,
+            stop_flag: &stop_flag,
+        };
+
+        // 各合法手を探索して評価値を取得
+        let child_depth = target_depth.saturating_sub(1);
+        let mut scored_moves: Vec<(Move, i32)> = Vec::with_capacity(legal_moves.len());
+
+        for &mv in &legal_moves {
+            pos.do_move(mv);
+            let score = -self.negamax(pos, child_depth, -INF, INF, 1, true, &ctx);
+            pos.undo_move();
+            scored_moves.push((mv, score));
+        }
+
+        // 最善スコアの検出
+        let best_score = scored_moves.iter().map(|(_, s)| *s).max().unwrap_or(-INF);
+
+        // 詰みスコアがある場合は最善手を即採用
+        if best_score >= MATE_SCORE - 200 {
+            if let Some(&(best_mv, score)) = scored_moves.iter().find(|(_, s)| *s == best_score) {
+                return (Some(best_mv), score);
+            }
+        }
+
+        // 温度スケーリング (歩1枚 = 100cp を基準とする)
+        let t_cp = (temperature * 100.0).max(1.0);
+
+        // ボルツマン重みの計算 (最善手から 350cp 以上劣る大悪手は除外)
+        let prune_threshold = best_score - 350;
+        let mut weights: Vec<f32> = Vec::with_capacity(scored_moves.len());
+
+        for &(_, score) in &scored_moves {
+            if score < prune_threshold {
+                weights.push(0.0);
+            } else {
+                let delta = (score - best_score) as f32 / t_cp;
+                weights.push(delta.exp());
+            }
+        }
+
+        let total_weight: f32 = weights.iter().sum();
+        if total_weight <= 0.0 {
+            let best_entry = scored_moves.into_iter().max_by_key(|(_, s)| *s);
+            return (best_entry.map(|(m, _)| m), best_score);
+        }
+
+        // 乱数による確率サンプリング
+        let r_val = (rng_seed as f64) / (u64::MAX as f64);
+        let mut target = (r_val as f32) * total_weight;
+
+        for (i, &(mv, score)) in scored_moves.iter().enumerate() {
+            target -= weights[i];
+            if target <= 0.0 {
+                return (Some(mv), score);
+            }
+        }
+
+        let best_entry = scored_moves.into_iter().max_by_key(|(_, s)| *s);
+        (best_entry.map(|(m, _)| m), best_score)
+    }
+
     /// 反復深化探索のエントリポイント
     pub fn search(
         &mut self,

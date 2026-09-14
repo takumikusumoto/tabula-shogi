@@ -107,6 +107,7 @@ fn test_selfplay_single_game_simulation() {
         tt_size_mb: 4,
         seed: 12345,
         eval_mode: tabula_shogi::eval::EvalMode::Hce,
+        temperature_plies: 2,
     };
 
     let mut engine = tabula_shogi::search::SearchEngine::new(config.tt_size_mb);
@@ -138,11 +139,32 @@ fn test_selfplay_manager_small_batch() {
         tt_size_mb: 4,
         seed: 99999,
         eval_mode: tabula_shogi::eval::EvalMode::Hce,
+        temperature_plies: 2,
     };
 
     let stats = SelfPlayManager::run(config);
     assert_eq!(stats.completed_games, 2);
     assert!(stats.total_plies > 0);
+}
+
+#[test]
+fn test_search_with_temperature_behavior() {
+    let mut pos = Position::startpos();
+    let mut engine = tabula_shogi::search::SearchEngine::new(4);
+
+    // 温度0.0での探索: search_fixed_depth と一致すること
+    let (fixed_mv, fixed_score) = engine.search_fixed_depth(&mut pos, 1);
+    let (temp_zero_mv, temp_zero_score) = engine.search_with_temperature(&mut pos, 1, 0.0, 42);
+    assert_eq!(fixed_mv, temp_zero_mv);
+    assert_eq!(fixed_score, temp_zero_score);
+
+    // 温度1.0での探索: 合法手が選ばれること
+    let legal_moves = tabula_shogi::movegen::MoveGenerator::generate_legal_moves(&mut pos);
+    let (temp_mv, score) = engine.search_with_temperature(&mut pos, 1, 1.0, 12345);
+    assert!(temp_mv.is_some());
+    assert!(legal_moves.contains(&temp_mv.unwrap()));
+    // 序盤の評価値は妥当な範囲内であること
+    assert!(score.abs() < 500);
 }
 
 #[test]
