@@ -285,14 +285,9 @@ impl NNUETrainer {
                 let w_feats = NNUEEvaluator::extract_features(&pos, Color::White);
 
                 // 探索評価値（知識蒸留）と最終勝敗のハイブリッド教師信号
-                // 探索スコアがある局面では探索評価値50% + 最終勝敗50%をブレンド、
-                // スコアが0の局面（定跡手等）では最終勝敗をそのまま教師ターゲットとする
-                let target = if entry.score == 0 {
-                    entry.result
-                } else {
-                    let score_prob = Self::sigmoid(entry.score as f32, k);
-                    0.5 * score_prob + 0.5 * entry.result
-                };
+                // 評価値 0 cp の局面も勝率 50% として滑らかにブレンド (0.5 * 0.5 + 0.5 * result)
+                let score_prob = Self::sigmoid(entry.score as f32, k);
+                let target = 0.5 * score_prob + 0.5 * entry.result;
 
                 parsed_data.push((b_feats, w_feats, pos.side_to_move, target));
             }

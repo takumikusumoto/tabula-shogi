@@ -14,7 +14,7 @@ fn test_nnue_roundtrip_and_serialization() {
 
     // 8 (magic) + 4 (input_size) + 4 (hidden_size) + 2520*128*2 + 128*2 + 256*2 + 4 = 645,908 bytes
     assert_eq!(bytes.len(), 645_908);
-    assert_eq!(&bytes[0..8], b"TABU_NN2");
+    assert_eq!(&bytes[0..8], b"TABU_NN3");
 
     // デシリアライズ検証
     let restored = NNUEEvaluator::from_bytes(&bytes).expect("Deserialization should succeed");
@@ -94,14 +94,15 @@ fn test_nnue_trainer_loss_convergence() {
     let pos0 = Position::startpos();
     let dataset = vec![DatasetEntry {
         sfen: pos0.to_sfen(),
-        score: 0,
+        score: 200,
         result: 1.0,
         move_usi: "7g7f".to_string(),
     }];
 
-    let (trained_eval, init_loss, final_loss) = trainer.train_dataset(&dataset, 20, 0.05, 1, 400.0);
+    let (trained_eval, init_loss, final_loss) =
+        trainer.train_dataset(&dataset, 20, 0.005, 1, 400.0);
 
-    // 初期損失 (0.5 - 1.0)^2 = 0.25 から学習により減少
+    // 初期損失から学習により減少
     assert!(
         final_loss < init_loss,
         "Loss must decrease: initial={init_loss}, final={final_loss}"

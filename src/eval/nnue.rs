@@ -7,7 +7,7 @@ pub const NNUE_HIDDEN_SIZE: usize = 128; // 超高速推論のため128ノード
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_ADDEND: u64 = 1;
 
-pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN2";
+pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN3";
 
 /// スクラッチ設計の NNUE 評価ネットワーク
 /// - 入力特徴量: 玉および全盤上駒(自軍14+敵軍14)・持ち駒の多次元スパース表現 (2520次元)

@@ -216,11 +216,12 @@ impl SelfImprovementLoop {
             );
             if let Err(e) = candidate_eval.save_to_file(best_model_path) {
                 eprintln!("Error writing promoted best model: {e}");
+                false
             } else {
                 *current_best_eval = EvalMode::Nnue(Arc::new(candidate_eval.clone()));
                 println!("Successfully promoted and updated '{}'!", best_model_path);
+                true
             }
-            true
         } else {
             println!(
                 "\n>>> [REJECTED] Gen {} Candidate did not surpass Best Model ({:.1}% win rate, Elo {:+.1}). Keeping existing best. <<<",
