@@ -13,6 +13,8 @@ pub struct NNUETrainer {
     // Adam モーメンタム追跡状態
     m_feat: Vec<[f32; NNUE_HIDDEN_SIZE]>,
     v_feat: Vec<[f32; NNUE_HIDDEN_SIZE]>,
+    m_f_bias: [f32; NNUE_HIDDEN_SIZE],
+    v_f_bias: [f32; NNUE_HIDDEN_SIZE],
     m_out: [f32; NNUE_HIDDEN_SIZE * 2],
     v_out: [f32; NNUE_HIDDEN_SIZE * 2],
     m_bias: f32,
@@ -57,6 +59,8 @@ impl NNUETrainer {
             output_bias,
             m_feat: vec![[0.0f32; NNUE_HIDDEN_SIZE]; NNUE_INPUT_SIZE],
             v_feat: vec![[0.0f32; NNUE_HIDDEN_SIZE]; NNUE_INPUT_SIZE],
+            m_f_bias: [0.0f32; NNUE_HIDDEN_SIZE],
+            v_f_bias: [0.0f32; NNUE_HIDDEN_SIZE],
             m_out: [0.0f32; NNUE_HIDDEN_SIZE * 2],
             v_out: [0.0f32; NNUE_HIDDEN_SIZE * 2],
             m_bias: 0.0,
@@ -134,11 +138,11 @@ impl NNUETrainer {
         1.0 / (1.0 + 10.0f32.powf(-score / k))
     }
 
-    /// 単一バッチのフォワード・バックワード・Adam更新
+    /// 単一バッチのフォワード・バックワード・Adam更新 (Residual Baseline & 隠れ層バイアス更新対応)
     #[allow(clippy::too_many_arguments)]
     pub fn train_batch(
         &mut self,
-        batch: &[(Vec<usize>, Vec<usize>, Color, f32)],
+        batch: &[(Vec<usize>, Vec<usize>, i32, Color, f32)],
         lr: f32,
         k: f32,
     ) -> f32 {
@@ -153,13 +157,15 @@ impl NNUETrainer {
 
         let mut grad_out_w = [0.0f32; NNUE_HIDDEN_SIZE * 2];
         let mut grad_out_b = 0.0f32;
+        let mut grad_feature_biases = [0.0f32; NNUE_HIDDEN_SIZE];
         let mut total_loss = 0.0f32;
 
         let mut active_feature_updates: std::collections::HashMap<usize, [f32; NNUE_HIDDEN_SIZE]> =
             std::collections::HashMap::new();
 
-        for (b_feats, w_feats, turn, result) in batch {
-            let (score_black, b_acc, w_acc, b_hidden, w_hidden) = self.forward(b_feats, w_feats);
+        for (b_feats, w_feats, mat_black, turn, result) in batch {
+            let (residual_black, b_acc, w_acc, b_hidden, w_hidden) = self.forward(b_feats, w_feats);
+            let score_black = *mat_black as f32 + residual_black;
             let score = match turn {
                 Color::Black => score_black,
                 Color::White => -score_black,
@@ -198,6 +204,11 @@ impl NNUETrainer {
                 if w_acc[i] > 0.0 && w_acc[i] < 1.0 {
                     d_w_acc[i] = d_output * self.output_weights[NNUE_HIDDEN_SIZE + i];
                 }
+            }
+
+            // 隠れ層バイアスの勾配累積 (Black/White 双方のアキュムレータ勾配の和)
+            for i in 0..NNUE_HIDDEN_SIZE {
+                grad_feature_biases[i] += d_b_acc[i] + d_w_acc[i];
             }
 
             // 特徴量層への逆伝播 (スパース累積)
@@ -247,6 +258,18 @@ impl NNUETrainer {
         let v_bias_hat = self.v_bias / (1.0 - self.beta2_pow);
         self.output_bias -= lr * m_bias_hat / (v_bias_hat.sqrt() + epsilon);
 
+        // 隠れ層バイアスの Adam 更新 (ニューロン死滅防止・活性化の回復)
+        for (i, &gb) in grad_feature_biases.iter().enumerate() {
+            let g = gb * inv_n;
+            self.m_f_bias[i] = beta1 * self.m_f_bias[i] + (1.0 - beta1) * g;
+            self.v_f_bias[i] = beta2 * self.v_f_bias[i] + (1.0 - beta2) * g * g;
+
+            let m_hat = self.m_f_bias[i] / (1.0 - self.beta1_pow);
+            let v_hat = self.v_f_bias[i] / (1.0 - self.beta2_pow);
+
+            self.feature_biases[i] -= lr * m_hat / (v_hat.sqrt() + epsilon);
+        }
+
         // 特徴量重みの Adam 更新 (スパース更新)
         for (f, grad_slice) in active_feature_updates {
             for (j, &gj) in grad_slice.iter().enumerate() {
@@ -277,19 +300,20 @@ impl NNUETrainer {
             return (self.quantize(), 0.0, 0.0);
         }
 
-        // 局面特徴量を事前パース
+        // 局面特徴量およびマテリアルベースラインを事前パース
         let mut parsed_data = Vec::with_capacity(dataset.len());
         for entry in dataset {
             if let Ok(pos) = Position::from_sfen(&entry.sfen) {
                 let b_feats = NNUEEvaluator::extract_features(&pos, Color::Black);
                 let w_feats = NNUEEvaluator::extract_features(&pos, Color::White);
+                let mat_black = NNUEEvaluator::material_black(&pos);
 
                 // 探索評価値（知識蒸留）と最終勝敗のハイブリッド教師信号
                 // 評価値 0 cp の局面も勝率 50% として滑らかにブレンド (0.5 * 0.5 + 0.5 * result)
                 let score_prob = Self::sigmoid(entry.score as f32, k);
                 let target = 0.5 * score_prob + 0.5 * entry.result;
 
-                parsed_data.push((b_feats, w_feats, pos.side_to_move, target));
+                parsed_data.push((b_feats, w_feats, mat_black, pos.side_to_move, target));
             }
         }
 
@@ -299,8 +323,9 @@ impl NNUETrainer {
 
         // 初期損失の計算
         let mut initial_loss = 0.0f32;
-        for (b_feats, w_feats, turn, result) in &parsed_data {
-            let (score_black, _, _, _, _) = self.forward(b_feats, w_feats);
+        for (b_feats, w_feats, mat_black, turn, result) in &parsed_data {
+            let (residual_black, _, _, _, _) = self.forward(b_feats, w_feats);
+            let score_black = *mat_black as f32 + residual_black;
             let score = match turn {
                 Color::Black => score_black,
                 Color::White => -score_black,
