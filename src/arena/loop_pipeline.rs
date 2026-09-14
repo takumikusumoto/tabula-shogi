@@ -1,5 +1,5 @@
 use super::match_runner::{MatchConfig, MatchResult, MatchRunner};
-use super::sprt::SprtConfig;
+use super::sprt::{SprtConfig, SprtStatus};
 use crate::eval::{EvalMode, NNUEEvaluator, NNUETrainer};
 use crate::selfplay::dataset::DatasetHandler;
 use crate::selfplay::{SelfPlayConfig, SelfPlayManager};
@@ -181,11 +181,25 @@ impl SelfImprovementLoop {
         current_best_eval: &mut EvalMode,
         best_model_path: &str,
     ) {
-        let promoted = match_res.win_rate_a > 0.50;
+        // 昇格条件: SPRT が Pass（統計的有意に強い）、または固定対局数終了時に勝率55%超
+        let sprt_passed = match_res
+            .sprt
+            .as_ref()
+            .map(|s| s.status == SprtStatus::Pass)
+            .unwrap_or(false);
+        let clear_win = match_res.win_rate_a >= 0.55;
+
+        let promoted = sprt_passed || clear_win;
         if promoted {
+            let reason = if sprt_passed {
+                "SPRT Pass"
+            } else {
+                "WinRate >= 55%"
+            };
             println!(
-                "\n>>> [PROMOTION] Gen {} Candidate won with {:.1}% win rate ({:+.1} Elo). Promoting to Best Model! <<<",
+                "\n>>> [PROMOTION] Gen {} Candidate won ({}) with {:.1}% win rate ({:+.1} Elo). Promoting to Best Model! <<<",
                 iter,
+                reason,
                 match_res.win_rate_a * 100.0,
                 match_res.elo_diff_a
             );
@@ -197,9 +211,10 @@ impl SelfImprovementLoop {
             }
         } else {
             println!(
-                "\n>>> [REJECTED] Gen {} Candidate did not surpass Best Model ({:.1}% win rate). Keeping existing best. <<<",
+                "\n>>> [REJECTED] Gen {} Candidate did not surpass Best Model ({:.1}% win rate, Elo {:+.1}). Keeping existing best. <<<",
                 iter,
-                match_res.win_rate_a * 100.0
+                match_res.win_rate_a * 100.0,
+                match_res.elo_diff_a
             );
         }
     }

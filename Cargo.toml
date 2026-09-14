@@ -8,6 +8,7 @@ description = "A pure scratch-built USI Shogi Engine using zero external weights
 license = "MIT"
 
 [dependencies]
+encoding_rs = "0.8.41"
 
 [profile.release]
 opt-level = 3

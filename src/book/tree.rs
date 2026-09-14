@@ -1,14 +1,62 @@
+use super::kif_reader::KifBook;
 use crate::board::Position;
 use crate::types::Move;
+use std::sync::OnceLock;
 
 pub struct OpeningBook;
 
 /// 定跡適用最大手数（26手以降は深層探索へ）
 pub const OPENING_BOOK_MAX_PLY: usize = 26;
 
+static KIF_BOOK: OnceLock<KifBook> = OnceLock::new();
+
+fn get_kif_book() -> &'static KifBook {
+    KIF_BOOK.get_or_init(|| {
+        // book/openings.kif が存在すれば読み込む
+        for candidate_path in &["book/openings.kif", "../book/openings.kif"] {
+            if std::path::Path::new(candidate_path).exists()
+                && let Ok(book) = KifBook::load_from_file(candidate_path)
+            {
+                return book;
+            }
+        }
+        KifBook::default()
+    })
+}
+
 impl OpeningBook {
-    /// 現在の局面または手数から定跡手を取得 (定跡にヒットすればSome(Move))
+    /// 現在の局面または手数から定跡手を取得 (KIF定跡優先、フォールバックとしてハードコード定跡)
     pub fn probe(pos: &Position) -> Option<Move> {
+        if pos.ply > OPENING_BOOK_MAX_PLY {
+            return None;
+        }
+
+        // 1. KIF 正本定跡ファイルからの照会
+        let book = get_kif_book();
+        if let Some(mv) = book.probe_best(pos) {
+            return Some(mv);
+        }
+
+        // 2. ハードコード組み込み定跡へのフォールバック
+        Self::probe_hardcoded(pos)
+    }
+
+    /// 確率サンプリングによる定跡手の選択（自己対局用）
+    pub fn probe_sample(pos: &Position, rng_val: u32) -> Option<Move> {
+        if pos.ply > OPENING_BOOK_MAX_PLY {
+            return None;
+        }
+
+        let book = get_kif_book();
+        if let Some(mv) = book.probe_sample(pos, rng_val) {
+            return Some(mv);
+        }
+
+        Self::probe_hardcoded(pos)
+    }
+
+    /// 過去の手順文字列によるハードコード組み込み定跡
+    pub fn probe_hardcoded(pos: &Position) -> Option<Move> {
         if pos.ply > OPENING_BOOK_MAX_PLY {
             return None;
         }

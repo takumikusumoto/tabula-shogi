@@ -17,6 +17,14 @@ impl DatasetHandler {
     /// 1対局の記録から学習用レコード群を抽出
     /// (序盤のランダム手はノイズを避けるため除外し、探索が行われた局面のみを抽出)
     pub fn extract_entries(game: &GameRecord, min_ply: usize) -> Vec<DatasetEntry> {
+        // 手数超過（打ち切り引き分け）は優劣が不明瞭なまま打ち切られるため、
+        // 学習ラベルの汚染を防ぐためデータセットから除外
+        if let super::game::GameResult::Draw(super::game::DrawReason::MaxPliesExceeded) =
+            game.result
+        {
+            return Vec::new();
+        }
+
         let mut entries = Vec::with_capacity(game.plies.len());
         let game_score_black = game.result.score_black();
 

@@ -1,5 +1,6 @@
 use super::config::SelfPlayConfig;
 use crate::board::Position;
+use crate::book::OpeningBook;
 use crate::movegen::MoveGenerator;
 use crate::search::SearchEngine;
 use crate::types::{Color, Move};
@@ -136,10 +137,18 @@ impl GameRunner {
 
             // 4. 着手の決定
             let (chosen_move, score) = if pos.ply <= config.random_opening_plies {
-                // 序盤の多様性確保: ランダム着手
-                let idx = rng.gen_range(legal_moves.len());
-                let mv = legal_moves[idx];
-                (mv, 0)
+                // 序盤の多様性確保: まず定跡ツリーから確率サンプリング
+                let book_sample = OpeningBook::probe_sample(&pos, rng.next_u64() as u32);
+                if let Some(bm) = book_sample
+                    && legal_moves.contains(&bm)
+                {
+                    (bm, 0)
+                } else {
+                    // 定跡外の場合はランダム着手
+                    let idx = rng.gen_range(legal_moves.len());
+                    let mv = legal_moves[idx];
+                    (mv, 0)
+                }
             } else {
                 // 探索による最善手
                 let (best_mv, eval_score) = engine.search_fixed_depth(&mut pos, config.depth);

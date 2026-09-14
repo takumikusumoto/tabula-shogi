@@ -91,18 +91,21 @@ impl SelfPlayManager {
             let handle = thread::spawn(move || {
                 let mut engine =
                     SearchEngine::new(cfg.tt_size_mb).with_eval_mode(cfg.eval_mode.clone());
-                // 各スレッドに独立した乱数シードを供給
-                let thread_seed =
-                    cfg.seed ^ ((thread_id as u64 + 1).wrapping_mul(0x517cc1b727220a95));
-                let mut rng = SimpleRng::new(thread_seed);
-
                 loop {
                     let game_id = counter.fetch_add(1, Ordering::SeqCst);
                     if game_id >= num_games {
                         break;
                     }
 
-                    let record = GameRunner::play_game(game_id + 1, &cfg, &mut engine, &mut rng);
+                    // 対局ごとにユニークなシードを生成（シード重複による同一棋譜ループを根絶）
+                    let game_seed = cfg
+                        .seed
+                        .wrapping_add((game_id as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
+                        ^ ((thread_id as u64 + 1).wrapping_mul(0x517cc1b727220a95));
+                    let mut game_rng = SimpleRng::new(game_seed);
+
+                    let record =
+                        GameRunner::play_game(game_id + 1, &cfg, &mut engine, &mut game_rng);
 
                     // CSA書き出し
                     if let Some(ref lock) = csa_lock {

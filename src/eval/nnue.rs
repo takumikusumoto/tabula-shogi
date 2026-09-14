@@ -1,16 +1,16 @@
 use crate::board::Position;
 use crate::types::{Color, PieceType, Square};
 
-pub const NNUE_INPUT_SIZE: usize = 81 * 14 + 7 * 2 * 18; // 盤上81マス×14駒種 + 持ち駒7種×2陣×最大18枚 = 1134 + 252 = 1386
+pub const NNUE_INPUT_SIZE: usize = 81 * 28 + 7 * 2 * 18; // 盤上81マス×28駒種(自駒14+敵駒14) + 持ち駒7種×2陣×最大18枚 = 2268 + 252 = 2520
 pub const NNUE_HIDDEN_SIZE: usize = 128; // 超高速推論のため128ノード
 
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_ADDEND: u64 = 1;
 
-pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN1";
+pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN2";
 
 /// スクラッチ設計の NNUE 評価ネットワーク
-/// - 入力特徴量: 玉および全盤上駒・持ち駒の多次元スパース表現 (1386次元)
+/// - 入力特徴量: 玉および全盤上駒(自軍14+敵軍14)・持ち駒の多次元スパース表現 (2520次元)
 /// - 隠れ層: 128ニューロン, ClippedReLU (0..=127)
 /// - 差分アキュムレータ (Accumulator): 局面移動時の高速インクリメンタル計算
 /// - 量子化: 16-bit 整数演算（SIMDフレンドリー）
@@ -218,9 +218,9 @@ impl NNUEEvaluator {
                     Color::White => (8 - sq.file() as usize) * 9 + (8 - sq.rank() as usize),
                 };
                 let pt_idx = piece.piece_type.index();
-                let color_offset = if piece.color == color { 0 } else { 7 };
-                let piece_idx = (pt_idx + color_offset) % 14;
-                let feat_idx = mapped_sq * 14 + piece_idx;
+                let color_offset = if piece.color == color { 0 } else { 14 };
+                let piece_idx = pt_idx + color_offset;
+                let feat_idx = mapped_sq * 28 + piece_idx;
                 if feat_idx < NNUE_INPUT_SIZE {
                     features.push(feat_idx);
                 }
@@ -228,7 +228,7 @@ impl NNUEEvaluator {
         }
 
         // 持ち駒特徴量
-        let mut hand_base = 81 * 14;
+        let mut hand_base = 81 * 28;
         for c in [color, color.opposite()] {
             for pt in PieceType::HAND_PIECES {
                 if let Some(h_idx) = pt.hand_index() {

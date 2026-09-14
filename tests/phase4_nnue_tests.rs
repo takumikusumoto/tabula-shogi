@@ -12,9 +12,9 @@ fn test_nnue_roundtrip_and_serialization() {
     let evaluator = NNUEEvaluator::new();
     let bytes = evaluator.to_bytes();
 
-    // 8 (magic) + 4 (input_size) + 4 (hidden_size) + 1386*128*2 + 128*2 + 256*2 + 4 = 355,604 bytes
-    assert_eq!(bytes.len(), 355_604);
-    assert_eq!(&bytes[0..8], b"TABU_NN1");
+    // 8 (magic) + 4 (input_size) + 4 (hidden_size) + 2520*128*2 + 128*2 + 256*2 + 4 = 645,908 bytes
+    assert_eq!(bytes.len(), 645_908);
+    assert_eq!(&bytes[0..8], b"TABU_NN2");
 
     // デシリアライズ検証
     let restored = NNUEEvaluator::from_bytes(&bytes).expect("Deserialization should succeed");
@@ -47,9 +47,21 @@ fn test_nnue_quantization() {
     let trainer = NNUETrainer::new();
     let nnue = trainer.quantize();
     let pos = Position::startpos();
-    let score = nnue.evaluate(&pos);
+    let score_int = nnue.evaluate(&pos);
+
+    // Float 推論側のスコア
+    let b_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::Black);
+    let w_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::White);
+    let (score_float, _, _, _, _) = trainer.forward(&b_feats, &w_feats);
+
     // 初期重みでの初期局面評価値は有限値
-    assert!(score.abs() < 10_000);
+    assert!(score_int.abs() < 10_000);
+    // 量子化誤差を考慮しても両者の符号とオーダーが一致すること（乖離が許容範囲内）を検証
+    let diff = (score_int as f32 - score_float).abs();
+    assert!(
+        diff < 30.0,
+        "Float vs Int inference discrepancy too large: float={score_float}, int={score_int}, diff={diff}"
+    );
 }
 
 #[test]

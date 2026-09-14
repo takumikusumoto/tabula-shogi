@@ -7,7 +7,7 @@ pub mod manager;
 pub use config::SelfPlayConfig;
 pub use csa::CsaSerializer;
 pub use dataset::{DatasetEntry, DatasetHandler};
-pub use game::{GameRecord, GameResult, GameRunner, PlyRecord};
+pub use game::{GameRecord, GameResult, GameRunner, PlyRecord, SimpleRng};
 pub use manager::{SelfPlayManager, SelfPlayStats};
 
 /// CLI引数をパースして自己対局を実行

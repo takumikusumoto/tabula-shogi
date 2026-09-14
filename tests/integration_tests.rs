@@ -312,4 +312,73 @@ mod tests {
             bd_hanging.coordination
         );
     }
+
+    #[test]
+    fn test_kif_book_parsing_and_branching() {
+        use tabula_shogi::book::KifBook;
+
+        let kif_sample = r#"
+手合割：平手
+先手：Sente
+後手：Gote
+
+手数----指手---------消費時間--
+   1 ７六歩(77)   ( 0:01/00:00:01)
+   2 ３四歩(33)   ( 0:01/00:00:01)
+   3 ２六歩(27)   ( 0:01/00:00:01)
+   4 ８四歩(83)   ( 0:01/00:00:01)
+まで4手で中断
+
+変化：2手
+   2 ８四歩(83)   ( 0:01/00:00:01)
+   3 ６八銀(79)   ( 0:01/00:00:01)
+まで3手で中断
+"#;
+
+        let book = KifBook::from_kif_string(kif_sample).expect("Valid KIF parse");
+        let mut pos = Position::startpos();
+
+        // 初期局面: 7g7f
+        let m1 = book.probe_best(&pos);
+        assert_eq!(m1, Some(Move::from_usi("7g7f").unwrap()));
+
+        // 1手進める
+        pos.do_move(m1.unwrap());
+
+        // 2手目の候補手: 本線 3c3d と 変化 8c8d の2つが登録されていること
+        let moves = book.probe_moves(&pos).expect("Should have moves at ply 1");
+        assert_eq!(moves.len(), 2);
+        let move_strings: Vec<String> = moves.iter().map(|(m, _)| m.to_usi()).collect();
+        assert!(move_strings.contains(&"3c3d".to_string()));
+        assert!(move_strings.contains(&"8c8d".to_string()));
+    }
+
+    #[test]
+    fn test_real_openings_kif_file() {
+        use tabula_shogi::book::KifBook;
+        let book =
+            KifBook::load_from_file("book/openings.kif").expect("Must parse real openings.kif");
+        assert!(!book.book_moves.is_empty(), "Book should have moves");
+        // 全9戦型（横歩取り、角換わり、四間飛車、三間飛車、中飛車、矢倉、相掛かり、等）から多数の局面が登録されていること
+        assert!(
+            book.book_moves.len() >= 50,
+            "Expected at least 50 positions, got {}",
+            book.book_moves.len()
+        );
+
+        // 初期局面で 7g7f, 2g2f, 5g5f (先手中飛車) の3手が登録されていること
+        let startpos = Position::startpos();
+        let moves = book
+            .probe_moves(&startpos)
+            .expect("Must have moves for startpos");
+        assert_eq!(
+            moves.len(),
+            3,
+            "Startpos should have 3 book moves (7g7f, 2g2f, 5g5f)"
+        );
+        assert_eq!(
+            book.probe_best(&startpos),
+            Some(Move::from_usi("7g7f").unwrap())
+        );
+    }
 }

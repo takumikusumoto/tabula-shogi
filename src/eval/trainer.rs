@@ -309,8 +309,16 @@ impl NNUETrainer {
 
         let b_size = batch_size.max(1);
         let mut final_loss = initial_loss;
+        let mut rng = crate::selfplay::SimpleRng::new(0xdeadbeefc0ffee);
 
         for _epoch in 0..epochs {
+            // エポックごとの Fisher-Yates シャッフル（ミニバッチ間の相関を解消）
+            let len = parsed_data.len();
+            for i in (1..len).rev() {
+                let j = rng.gen_range(i + 1);
+                parsed_data.swap(i, j);
+            }
+
             let mut epoch_loss = 0.0f32;
             let mut batches = 0;
 
