@@ -62,6 +62,26 @@ fn test_nnue_quantization() {
         diff < 30.0,
         "Float vs Int inference discrepancy too large: float={score_float}, int={score_int}, diff={diff}"
     );
+
+    // 初期局面の対称性に頼らない非対称局面での厳密な一致検証
+    let asym_pos =
+        Position::from_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2")
+            .expect("Valid asymmetric sfen");
+    let asym_score_int = nnue.evaluate(&asym_pos);
+    let asym_b_feats =
+        NNUEEvaluator::extract_features(&asym_pos, tabula_shogi::types::Color::Black);
+    let asym_w_feats =
+        NNUEEvaluator::extract_features(&asym_pos, tabula_shogi::types::Color::White);
+    let (asym_score_float_raw, _, _, _, _) = trainer.forward(&asym_b_feats, &asym_w_feats);
+    let asym_score_float = match asym_pos.side_to_move {
+        tabula_shogi::types::Color::Black => asym_score_float_raw,
+        tabula_shogi::types::Color::White => -asym_score_float_raw,
+    };
+    let asym_diff = (asym_score_int as f32 - asym_score_float).abs();
+    assert!(
+        asym_diff < 50.0,
+        "Asymmetric Float vs Int discrepancy too large: float={asym_score_float}, int={asym_score_int}, diff={asym_diff}"
+    );
 }
 
 #[test]

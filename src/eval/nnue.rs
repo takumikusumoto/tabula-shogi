@@ -93,7 +93,7 @@ impl NNUEEvaluator {
             *w = (f * 64.0).clamp(-127.0, 127.0).round() as i16;
         }
 
-        let quantized_out_bias = (output_bias * 256.0).round() as i32;
+        let quantized_out_bias = (output_bias * 4096.0).round() as i32;
 
         NNUEEvaluator {
             feature_weights: quantized_feats,
@@ -272,17 +272,18 @@ impl NNUEEvaluator {
 
         let mut output = self.output_bias;
 
-        // ClippedReLU(x) = clamp(x, 0, 127)
+        // ClippedReLU(x) = clamp(x, 0, 64) (Float側 clamp(0.0, 1.0) * 64 と厳密整合)
         for i in 0..NNUE_HIDDEN_SIZE {
-            let b_val = black_acc[i].clamp(0, 127) as i32;
-            let w_val = white_acc[i].clamp(0, 127) as i32;
+            let b_val = black_acc[i].clamp(0, 64) as i32;
+            let w_val = white_acc[i].clamp(0, 64) as i32;
 
             output += b_val * self.output_weights[i] as i32;
             output += w_val * self.output_weights[NNUE_HIDDEN_SIZE + i] as i32;
         }
 
-        // 整数スケーリング (固定小数点からセンチポーンへ変換)
-        let cp = output / 256;
+        // 整数スケーリング: 重み項 (64 * 64) とバイアス項 (4096) を 16 で割ることで
+        // Float 学習側 (score = output * 256.0) と数学的に 1 対 1 で完全一致
+        let cp = output / 16;
 
         match pos.side_to_move {
             Color::Black => cp,
