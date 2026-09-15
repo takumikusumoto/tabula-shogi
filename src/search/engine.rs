@@ -170,8 +170,22 @@ impl SearchEngine {
                 }
 
                 if current_alpha <= alpha {
+                    if alpha == -INF {
+                        best_score = current_alpha;
+                        if let Some(bm) = loop_best_move {
+                            best_move = bm;
+                        }
+                        break;
+                    }
                     alpha = -INF;
                 } else if current_alpha >= beta {
+                    if beta == INF {
+                        best_score = current_alpha;
+                        if let Some(bm) = loop_best_move {
+                            best_move = bm;
+                        }
+                        break;
+                    }
                     beta = INF;
                 } else {
                     best_score = current_alpha;
@@ -406,9 +420,19 @@ impl SearchEngine {
 
                 // 窓探索の合致判定
                 if current_alpha <= alpha {
+                    if alpha == -INF {
+                        current_best_move = loop_best_move;
+                        best_score = current_alpha;
+                        break;
+                    }
                     // fail-low: 窓を下方に広げて再探索
                     alpha = -INF;
                 } else if current_alpha >= beta {
+                    if beta == INF {
+                        current_best_move = loop_best_move;
+                        best_score = current_alpha;
+                        break;
+                    }
                     // fail-high: 窓を上方に広げて再探索
                     beta = INF;
                 } else {
