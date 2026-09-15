@@ -28,8 +28,8 @@ impl Default for LoopConfig {
             eval_pairs: 15,
             threads: 2,
             depth: 2,
-            epochs: 10,
-            lr: 0.005,
+            epochs: 3,
+            lr: 0.001,
             batch_size: 64,
             data_path: "loop_dataset.tsv".to_string(),
             best_model_path: "best_nnue.bin".to_string(),
@@ -85,7 +85,28 @@ impl SelfImprovementLoop {
 
         let mut trainer = match &current_best_eval {
             EvalMode::Nnue(best_nnue) => NNUETrainer::from_evaluator(best_nnue),
-            EvalMode::Hce => NNUETrainer::new(),
+            EvalMode::Hce => {
+                if Path::new(&config.candidate_model_path).exists() {
+                    match NNUEEvaluator::load_from_file(&config.candidate_model_path) {
+                        Ok(candidate) => {
+                            println!(
+                                "Loaded existing candidate model from '{}' for training continuation",
+                                config.candidate_model_path
+                            );
+                            NNUETrainer::from_evaluator(&candidate)
+                        }
+                        Err(e) => {
+                            println!(
+                                "Failed to load candidate '{}' ({e}), starting from scratch",
+                                config.candidate_model_path
+                            );
+                            NNUETrainer::new()
+                        }
+                    }
+                } else {
+                    NNUETrainer::new()
+                }
+            }
         };
 
         for iter in 1..=config.iterations {

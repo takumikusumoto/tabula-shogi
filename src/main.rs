@@ -397,9 +397,9 @@ fn run_loop(args: &[String]) {
                 println!("    -t, --threads <T>       Worker threads [default: 2]");
                 println!("    -d, --depth <D>         Search depth [default: 2]");
                 println!(
-                    "    -e, --epochs <E>        NNUE training epochs per generation [default: 10]"
+                    "    -e, --epochs <E>        NNUE training epochs per generation [default: 3]"
                 );
-                println!("        --lr <FLOAT>        Learning rate [default: 0.005]");
+                println!("        --lr <FLOAT>        Learning rate [default: 0.001]");
                 println!(
                     "        --data <PATH>       Path to cumulative training dataset [default: loop_dataset.tsv]"
                 );
