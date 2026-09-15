@@ -9,7 +9,7 @@
 
 - **完全スクラッチ＆白紙からの自己進化（Tabula Rasa Philosophy）**:
   - やねうら王、Apery、Stockfish等の外部OSSコードや探索ルーチンの流用は一切行っていません。
-  - 外部の学習済みNNUE重みファイル等に依存せず、ゼロベースで設計された駒得・Piece-Square Tables (PST)・玉の安全度・大局観（HCE）およびスクラッチNNUE評価ネットワーク（1386入力 ➜ 128隠れ層 ClippedReLU ➜ 1出力、16bit整数量子化）を採用。
+  - 外部の学習済みNNUE重みファイル等に依存せず、ゼロベースで設計された駒得・Piece-Square Tables (PST)・玉の安全度・大局観（HCE）およびスクラッチ Residual Baseline NNUE 評価ネットワーク（2520入力 ➜ 128隠れ層 ClippedReLU ➜ 駒割りベースライン残差推論 TABU_NN4、16bit整数量子化）を採用。
   - 自己対局生成データを用いたバックプロパゲーション＆Adamオプティマイザによる強化学習・評価関数自己進化パイプラインを完全内蔵。
 - **超高速・堅牢なRust実装**:
   - 外部クレート依存ゼロ（Zero External Dependencies）。標準ライブラリのみで完結。
