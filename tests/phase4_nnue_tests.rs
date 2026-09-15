@@ -1,7 +1,7 @@
 use std::fs;
 use std::sync::Arc;
 use tabula_shogi::board::Position;
-use tabula_shogi::eval::{EvalMode, NNUEEvaluator, NNUETrainer};
+use tabula_shogi::eval::{EvalMode, NNUEEvaluator, NNUETrainer, RESIDUAL_BOUND_CP};
 use tabula_shogi::search::SearchEngine;
 use tabula_shogi::selfplay::dataset::DatasetEntry;
 use tabula_shogi::usi::UsiHandler;
@@ -14,7 +14,7 @@ fn test_nnue_roundtrip_and_serialization() {
 
     // 8 (magic) + 4 (input_size) + 4 (hidden_size) + 2520*128*2 + 128*2 + 256*2 + 4 = 645,908 bytes
     assert_eq!(bytes.len(), 645_908);
-    assert_eq!(&bytes[0..8], b"TABU_NN4");
+    assert_eq!(&bytes[0..8], b"TABU_NN5");
 
     // デシリアライズ検証
     let restored = NNUEEvaluator::from_bytes(&bytes).expect("Deserialization should succeed");
@@ -49,12 +49,14 @@ fn test_nnue_quantization() {
     let pos = Position::startpos();
     let score_int = nnue.evaluate(&pos);
 
-    // Float 推論側のスコア (駒割りベースライン + 残差)
-    let b_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::Black);
-    let w_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::White);
-    let (res_float, _, _, _, _) = trainer.forward(&b_feats, &w_feats);
-    let mat_black = NNUEEvaluator::material_black(&pos);
-    let score_float = mat_black as f32 + res_float;
+    // Float 推論側のスコア (手番側駒割りベースライン + 残差)
+    let mover = pos.side_to_move;
+    let opp = mover.opposite();
+    let m_feats = NNUEEvaluator::extract_features(&pos, mover);
+    let o_feats = NNUEEvaluator::extract_features(&pos, opp);
+    let (res_float, _, _, _, _, _) = trainer.forward(&m_feats, &o_feats);
+    let mat_stm = NNUEEvaluator::material_stm(&pos);
+    let score_float = mat_stm as f32 + res_float;
 
     // 初期重みでの初期局面評価値は有限値 (駒割りが等しいので 0)
     assert_eq!(score_int, 0);
@@ -65,17 +67,14 @@ fn test_nnue_quantization() {
         Position::from_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2")
             .expect("Valid asymmetric sfen");
     let asym_score_int = nnue.evaluate(&asym_pos);
-    let asym_b_feats =
-        NNUEEvaluator::extract_features(&asym_pos, tabula_shogi::types::Color::Black);
-    let asym_w_feats =
-        NNUEEvaluator::extract_features(&asym_pos, tabula_shogi::types::Color::White);
-    let (asym_res_float_raw, _, _, _, _) = trainer.forward(&asym_b_feats, &asym_w_feats);
-    let asym_mat_black = NNUEEvaluator::material_black(&asym_pos);
-    let asym_score_black_float = asym_mat_black as f32 + asym_res_float_raw;
-    let asym_score_float = match asym_pos.side_to_move {
-        tabula_shogi::types::Color::Black => asym_score_black_float,
-        tabula_shogi::types::Color::White => -asym_score_black_float,
-    };
+    let asym_mover = asym_pos.side_to_move;
+    let asym_opp = asym_mover.opposite();
+    let asym_m_feats = NNUEEvaluator::extract_features(&asym_pos, asym_mover);
+    let asym_o_feats = NNUEEvaluator::extract_features(&asym_pos, asym_opp);
+    let (asym_res_float, _, _, _, _, _) = trainer.forward(&asym_m_feats, &asym_o_feats);
+    let asym_mat_stm = NNUEEvaluator::material_stm(&asym_pos);
+    let asym_score_float = asym_mat_stm as f32 + asym_res_float;
+
     let asym_diff = (asym_score_int as f32 - asym_score_float).abs();
     assert!(
         asym_diff < 1.0,
@@ -178,21 +177,17 @@ fn test_nnue_hidden_bias_gradient_update() {
 
     // 1サンプルのバッチで学習を実行
     let pos = Position::startpos();
-    let b_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::Black);
-    let w_feats = NNUEEvaluator::extract_features(&pos, tabula_shogi::types::Color::White);
-    let mat_black = NNUEEvaluator::material_black(&pos);
+    let mover = pos.side_to_move;
+    let opp = mover.opposite();
+    let m_feats = NNUEEvaluator::extract_features(&pos, mover);
+    let o_feats = NNUEEvaluator::extract_features(&pos, opp);
+    let mat_stm = NNUEEvaluator::material_stm(&pos);
 
     // 出力層重みを非ゼロにして勾配を通す
     trainer.output_weights[0] = 0.5;
 
-    // 白番で先手大優勢(1.0)のサンプルを与えることで勾配を発生させる
-    let batch = vec![(
-        b_feats,
-        w_feats,
-        mat_black,
-        tabula_shogi::types::Color::Black,
-        1.0,
-    )];
+    // 先手大優勢(1.0)のサンプルを与えることで勾配を発生させる
+    let batch = vec![(m_feats, o_feats, mat_stm, 1.0)];
     let _loss = trainer.train_batch(&batch, 0.05, 400.0);
 
     // feature_biases[0] が更新されたことを検証 (以前は actual_update = 0 でバグっていた)
@@ -349,5 +344,69 @@ fn test_nnue_trainer_from_evaluator_warm_start() {
     assert!(
         score2 >= score1,
         "Score should further improve: {score1} -> {score2}"
+    );
+}
+
+#[test]
+fn test_nnue_turn_symmetry() {
+    let evaluator = NNUEEvaluator::new();
+
+    // 完全対称局面（初期局面）: 先手番で 0 cp
+    let pos_start = Position::startpos();
+    assert_eq!(evaluator.evaluate(&pos_start), 0);
+
+    // 先手と後手が完全に対称な局面において、手番のみが異なる場合の対称性
+    let mut pos_white = pos_start.clone();
+    pos_white.side_to_move = tabula_shogi::types::Color::White;
+    assert_eq!(evaluator.evaluate(&pos_white), 0);
+}
+
+#[test]
+fn test_nnue_residual_strictly_bounded() {
+    // 極端な重みを持つ評価器を作成して、残差が必ず [-300, 300] にクリップされることを検証
+    let mut evaluator = NNUEEvaluator::new();
+    evaluator.output_bias = 100_000; // 巨大なバイアス
+
+    let pos = Position::startpos();
+    let mat_stm = NNUEEvaluator::material_stm(&pos);
+    let eval = evaluator.evaluate(&pos);
+    let residual = eval - mat_stm;
+
+    assert_eq!(
+        residual, RESIDUAL_BOUND_CP,
+        "Residual must be clamped to max bound +300 cp even with huge positive bias"
+    );
+
+    evaluator.output_bias = -100_000;
+    let eval_neg = evaluator.evaluate(&pos);
+    let residual_neg = eval_neg - mat_stm;
+    assert_eq!(
+        residual_neg, -RESIDUAL_BOUND_CP,
+        "Residual must be clamped to min bound -300 cp even with huge negative bias"
+    );
+}
+
+#[test]
+fn test_see_xray_battery_attack() {
+    use tabula_shogi::search::SEE;
+    use tabula_shogi::types::Move;
+
+    // 局面: 2八に先手飛車、2四に先手銀、2三に後手歩、2一に後手金
+    // SFEN 各行は9筋から1筋へ: 2筋は左から7マス空けた8マス目
+    // SFEN: "4k4/7g1/7p1/7S1/9/9/9/7R1/4K4 b - 1"
+    let pos = Position::from_sfen("4k4/7g1/7p1/7S1/9/9/9/7R1/4K4 b - 1")
+        .expect("Valid battery test position");
+
+    // 初手: 2四の銀で 2三の歩を取る ("2d2c")
+    let mv_capture = Move::from_usi("2d2c").expect("Valid move 2d2c");
+
+    // SEE 評価:
+    // 銀で歩を取る(+100) -> 金が銀を取る(+500) -> 飛車が背後からX-rayで金を取り返す(+500)
+    // 最終得失: 歩(+100) + 金(+500) - 銀(500) = +100 cp (駒得)
+    // X-ray が見えていないと、飛車での取り返しが見えず、-400 cp (駒損) と誤判定される
+    let see_val = SEE::evaluate(&pos, mv_capture);
+    assert_eq!(
+        see_val, 100,
+        "SEE with X-ray must evaluate battery capture as +100 cp, but got {see_val}"
     );
 }

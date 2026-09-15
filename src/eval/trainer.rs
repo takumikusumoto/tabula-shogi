@@ -1,7 +1,6 @@
-use super::nnue::{NNUE_HIDDEN_SIZE, NNUE_INPUT_SIZE, NNUEEvaluator};
+use super::nnue::{NNUE_HIDDEN_SIZE, NNUE_INPUT_SIZE, NNUEEvaluator, RESIDUAL_BOUND_CP};
 use crate::board::Position;
 use crate::selfplay::DatasetEntry;
-use crate::types::Color;
 
 /// ゼロ外部依存のスクラッチ NNUE バックプロパゲーション学習器
 pub struct NNUETrainer {
@@ -75,61 +74,64 @@ impl NNUETrainer {
         Self::from_evaluator(&initial_eval)
     }
 
-    /// フォワードパス
-    /// 戻り値: (先手視点スコア, b_acc, w_acc, b_hidden, w_hidden)
+    /// フォワードパス (Mover-first 手番視点)
+    /// 戻り値: (手番視点残差cp, 生出力, m_acc, o_acc, m_hidden, o_hidden)
     pub fn forward(
         &self,
-        b_feats: &[usize],
-        w_feats: &[usize],
+        mover_feats: &[usize],
+        opp_feats: &[usize],
     ) -> (
+        f32,
         f32,
         [f32; NNUE_HIDDEN_SIZE],
         [f32; NNUE_HIDDEN_SIZE],
         [f32; NNUE_HIDDEN_SIZE],
         [f32; NNUE_HIDDEN_SIZE],
     ) {
-        let mut b_acc = self.feature_biases;
-        for &f in b_feats {
+        let mut m_acc = self.feature_biases;
+        for &f in mover_feats {
             if f < NNUE_INPUT_SIZE {
-                for (a, &w) in b_acc.iter_mut().zip(self.feature_weights[f].iter()) {
+                for (a, &w) in m_acc.iter_mut().zip(self.feature_weights[f].iter()) {
                     *a += w;
                 }
             }
         }
 
-        let mut w_acc = self.feature_biases;
-        for &f in w_feats {
+        let mut o_acc = self.feature_biases;
+        for &f in opp_feats {
             if f < NNUE_INPUT_SIZE {
-                for (a, &w) in w_acc.iter_mut().zip(self.feature_weights[f].iter()) {
+                for (a, &w) in o_acc.iter_mut().zip(self.feature_weights[f].iter()) {
                     *a += w;
                 }
             }
         }
 
         // ClippedReLU (0.0..=1.0)
-        let mut b_hidden = [0.0f32; NNUE_HIDDEN_SIZE];
-        for (h, &a) in b_hidden.iter_mut().zip(b_acc.iter()) {
+        let mut m_hidden = [0.0f32; NNUE_HIDDEN_SIZE];
+        for (h, &a) in m_hidden.iter_mut().zip(m_acc.iter()) {
             *h = a.clamp(0.0, 1.0);
         }
 
-        let mut w_hidden = [0.0f32; NNUE_HIDDEN_SIZE];
-        for (h, &a) in w_hidden.iter_mut().zip(w_acc.iter()) {
+        let mut o_hidden = [0.0f32; NNUE_HIDDEN_SIZE];
+        for (h, &a) in o_hidden.iter_mut().zip(o_acc.iter()) {
             *h = a.clamp(0.0, 1.0);
         }
 
-        // 出力層
+        // 出力層 (Mover-first 結合)
         let mut output = self.output_bias;
-        for (i, &h) in b_hidden.iter().enumerate() {
+        for (i, &h) in m_hidden.iter().enumerate() {
             output += h * self.output_weights[i];
         }
-        for (i, &h) in w_hidden.iter().enumerate() {
+        for (i, &h) in o_hidden.iter().enumerate() {
             output += h * self.output_weights[NNUE_HIDDEN_SIZE + i];
         }
 
-        // センチポーンスケール
-        let score_cp = output * 256.0;
+        // センチポーンスケール & 有界残差
+        let bound = RESIDUAL_BOUND_CP as f32;
+        let raw_residual_cp = output * 256.0;
+        let residual_cp = raw_residual_cp.clamp(-bound, bound);
 
-        (score_cp, b_acc, w_acc, b_hidden, w_hidden)
+        (residual_cp, output, m_acc, o_acc, m_hidden, o_hidden)
     }
 
     /// シグモイド勝率予測
@@ -138,11 +140,11 @@ impl NNUETrainer {
         1.0 / (1.0 + 10.0f32.powf(-score / k))
     }
 
-    /// 単一バッチのフォワード・バックワード・Adam更新 (Residual Baseline & 隠れ層バイアス更新対応)
-    #[allow(clippy::too_many_arguments)]
+    /// 単一バッチのフォワード・バックワード・AdamW更新
+    /// (Mover-first 結合, Preactivation Range Penalty, AdamW Weight Decay, 飽和残差ガード対応)
     pub fn train_batch(
         &mut self,
-        batch: &[(Vec<usize>, Vec<usize>, i32, Color, f32)],
+        batch: &[(Vec<usize>, Vec<usize>, i32, f32)],
         lr: f32,
         k: f32,
     ) -> f32 {
@@ -153,7 +155,10 @@ impl NNUETrainer {
         let beta1 = 0.9f32;
         let beta2 = 0.999f32;
         let epsilon = 1e-8f32;
+        let weight_decay = 0.001f32;
+        let lambda_range = 0.01f32; // Preactivation Range Penalty 係数
         let ln10_div_k = 10.0f32.ln() / k;
+        let bound = RESIDUAL_BOUND_CP as f32;
 
         let mut grad_out_w = [0.0f32; NNUE_HIDDEN_SIZE * 2];
         let mut grad_out_b = 0.0f32;
@@ -163,72 +168,100 @@ impl NNUETrainer {
         let mut active_feature_updates: std::collections::HashMap<usize, [f32; NNUE_HIDDEN_SIZE]> =
             std::collections::HashMap::new();
 
-        for (b_feats, w_feats, mat_black, turn, result) in batch {
-            let (residual_black, b_acc, w_acc, b_hidden, w_hidden) = self.forward(b_feats, w_feats);
-            let score_black = *mat_black as f32 + residual_black;
-            let score = match turn {
-                Color::Black => score_black,
-                Color::White => -score_black,
-            };
+        for (mover_feats, opp_feats, mat_stm, target) in batch {
+            let (residual_stm, raw_output, m_acc, o_acc, m_hidden, o_hidden) =
+                self.forward(mover_feats, opp_feats);
+            let score_stm = *mat_stm as f32 + residual_stm;
 
-            let pred = Self::sigmoid(score, k);
-            let error = pred - result; // (予測 - 実績)
+            let pred = Self::sigmoid(score_stm, k);
+            let error = pred - target; // (予測 - 教師信号)
             total_loss += error * error;
 
             // dL / d_score
             let d_sigmoid = pred * (1.0 - pred) * ln10_div_k;
             let d_loss_d_score = 2.0 * error * d_sigmoid;
 
-            // dL / d_output (手番による符号考慮)
-            let turn_sign = match turn {
-                Color::Black => 1.0f32,
-                Color::White => -1.0f32,
+            // 残差飽和ガード:
+            // 境界外であっても、正常領域へ引き戻す勾配 (過大時の引き下げ / 過小時の引き上げ) は確実に通す
+            let raw_residual = raw_output * 256.0;
+            let d_output = if raw_residual >= bound {
+                if d_loss_d_score > 0.0 {
+                    d_loss_d_score * 256.0
+                } else {
+                    0.0
+                }
+            } else if raw_residual <= -bound {
+                if d_loss_d_score < 0.0 {
+                    d_loss_d_score * 256.0
+                } else {
+                    0.0
+                }
+            } else {
+                d_loss_d_score * 256.0
             };
-            let d_output = d_loss_d_score * turn_sign * 256.0;
 
             grad_out_b += d_output;
 
-            // 出力層重み勾配 & 隠れ層への逆伝播
-            let mut d_b_acc = [0.0f32; NNUE_HIDDEN_SIZE];
-            for (i, &h) in b_hidden.iter().enumerate() {
+            // 出力層重み勾配 & 隠れ層への逆伝播 (タスク勾配 + Range Penalty)
+            let mut d_m_acc = [0.0f32; NNUE_HIDDEN_SIZE];
+            for (i, &h) in m_hidden.iter().enumerate() {
                 grad_out_w[i] += d_output * h;
-                // ClippedReLU gradient: 0.0 < acc < 1.0 のみ通過
-                if b_acc[i] > 0.0 && b_acc[i] < 1.0 {
-                    d_b_acc[i] = d_output * self.output_weights[i];
-                }
+                let task_grad = if m_acc[i] > 0.0 && m_acc[i] < 1.0 {
+                    d_output * self.output_weights[i]
+                } else {
+                    0.0
+                };
+                let range_penalty = if m_acc[i] < 0.0 {
+                    lambda_range * m_acc[i]
+                } else if m_acc[i] > 1.0 {
+                    lambda_range * (m_acc[i] - 1.0)
+                } else {
+                    0.0
+                };
+                d_m_acc[i] = task_grad + range_penalty;
             }
 
-            let mut d_w_acc = [0.0f32; NNUE_HIDDEN_SIZE];
-            for (i, &h) in w_hidden.iter().enumerate() {
+            let mut d_o_acc = [0.0f32; NNUE_HIDDEN_SIZE];
+            for (i, &h) in o_hidden.iter().enumerate() {
                 grad_out_w[NNUE_HIDDEN_SIZE + i] += d_output * h;
-                if w_acc[i] > 0.0 && w_acc[i] < 1.0 {
-                    d_w_acc[i] = d_output * self.output_weights[NNUE_HIDDEN_SIZE + i];
-                }
+                let task_grad = if o_acc[i] > 0.0 && o_acc[i] < 1.0 {
+                    d_output * self.output_weights[NNUE_HIDDEN_SIZE + i]
+                } else {
+                    0.0
+                };
+                let range_penalty = if o_acc[i] < 0.0 {
+                    lambda_range * o_acc[i]
+                } else if o_acc[i] > 1.0 {
+                    lambda_range * (o_acc[i] - 1.0)
+                } else {
+                    0.0
+                };
+                d_o_acc[i] = task_grad + range_penalty;
             }
 
-            // 隠れ層バイアスの勾配累積 (Black/White 双方のアキュムレータ勾配の和)
+            // 隠れ層バイアスの勾配累積 (Mover / Opponent アキュムレータ勾配の和)
             for i in 0..NNUE_HIDDEN_SIZE {
-                grad_feature_biases[i] += d_b_acc[i] + d_w_acc[i];
+                grad_feature_biases[i] += d_m_acc[i] + d_o_acc[i];
             }
 
             // 特徴量層への逆伝播 (スパース累積)
-            for &f in b_feats {
+            for &f in mover_feats {
                 if f < NNUE_INPUT_SIZE {
                     let entry = active_feature_updates
                         .entry(f)
                         .or_insert([0.0f32; NNUE_HIDDEN_SIZE]);
-                    for (acc_w, &d) in entry.iter_mut().zip(d_b_acc.iter()) {
+                    for (acc_w, &d) in entry.iter_mut().zip(d_m_acc.iter()) {
                         *acc_w += d;
                     }
                 }
             }
 
-            for &f in w_feats {
+            for &f in opp_feats {
                 if f < NNUE_INPUT_SIZE {
                     let entry = active_feature_updates
                         .entry(f)
                         .or_insert([0.0f32; NNUE_HIDDEN_SIZE]);
-                    for (acc_w, &d) in entry.iter_mut().zip(d_w_acc.iter()) {
+                    for (acc_w, &d) in entry.iter_mut().zip(d_o_acc.iter()) {
                         *acc_w += d;
                     }
                 }
@@ -239,7 +272,7 @@ impl NNUETrainer {
         self.beta1_pow *= beta1;
         self.beta2_pow *= beta2;
 
-        // 出力層の Adam 更新
+        // 出力層の AdamW 更新 (Weight Decay 適用)
         for (i, &gw) in grad_out_w.iter().enumerate() {
             let g = gw * inv_n;
             self.m_out[i] = beta1 * self.m_out[i] + (1.0 - beta1) * g;
@@ -248,9 +281,11 @@ impl NNUETrainer {
             let m_hat = self.m_out[i] / (1.0 - self.beta1_pow);
             let v_hat = self.v_out[i] / (1.0 - self.beta2_pow);
 
-            self.output_weights[i] -= lr * m_hat / (v_hat.sqrt() + epsilon);
+            self.output_weights[i] = self.output_weights[i] * (1.0 - lr * weight_decay)
+                - lr * m_hat / (v_hat.sqrt() + epsilon);
         }
 
+        // 出力バイアスの Adam 更新
         let g_bias = grad_out_b * inv_n;
         self.m_bias = beta1 * self.m_bias + (1.0 - beta1) * g_bias;
         self.v_bias = beta2 * self.v_bias + (1.0 - beta2) * g_bias * g_bias;
@@ -258,7 +293,7 @@ impl NNUETrainer {
         let v_bias_hat = self.v_bias / (1.0 - self.beta2_pow);
         self.output_bias -= lr * m_bias_hat / (v_bias_hat.sqrt() + epsilon);
 
-        // 隠れ層バイアスの Adam 更新 (ニューロン死滅防止・活性化の回復)
+        // 隠れ層バイアスの Adam 更新 (Range Penalty による自己修復引き戻し)
         for (i, &gb) in grad_feature_biases.iter().enumerate() {
             let g = gb * inv_n;
             self.m_f_bias[i] = beta1 * self.m_f_bias[i] + (1.0 - beta1) * g;
@@ -270,7 +305,7 @@ impl NNUETrainer {
             self.feature_biases[i] -= lr * m_hat / (v_hat.sqrt() + epsilon);
         }
 
-        // 特徴量重みの Adam 更新 (スパース更新)
+        // 特徴量重みの AdamW 更新 (スパース更新 + Weight Decay 適用)
         for (f, grad_slice) in active_feature_updates {
             for (j, &gj) in grad_slice.iter().enumerate() {
                 let g = gj * inv_n;
@@ -280,7 +315,8 @@ impl NNUETrainer {
                 let m_hat = self.m_feat[f][j] / (1.0 - self.beta1_pow);
                 let v_hat = self.v_feat[f][j] / (1.0 - self.beta2_pow);
 
-                self.feature_weights[f][j] -= lr * m_hat / (v_hat.sqrt() + epsilon);
+                self.feature_weights[f][j] = self.feature_weights[f][j] * (1.0 - lr * weight_decay)
+                    - lr * m_hat / (v_hat.sqrt() + epsilon);
             }
         }
 
@@ -300,20 +336,21 @@ impl NNUETrainer {
             return (self.quantize(), 0.0, 0.0);
         }
 
-        // 局面特徴量およびマテリアルベースラインを事前パース
+        // 局面特徴量および手番側マテリアルベースラインを事前パース (Mover-first)
         let mut parsed_data = Vec::with_capacity(dataset.len());
         for entry in dataset {
             if let Ok(pos) = Position::from_sfen(&entry.sfen) {
-                let b_feats = NNUEEvaluator::extract_features(&pos, Color::Black);
-                let w_feats = NNUEEvaluator::extract_features(&pos, Color::White);
-                let mat_black = NNUEEvaluator::material_black(&pos);
+                let mover = pos.side_to_move;
+                let opp = mover.opposite();
+                let mover_feats = NNUEEvaluator::extract_features(&pos, mover);
+                let opp_feats = NNUEEvaluator::extract_features(&pos, opp);
+                let mat_stm = NNUEEvaluator::material_stm(&pos);
 
                 // 探索評価値（知識蒸留）と最終勝敗のハイブリッド教師信号
-                // 評価値 0 cp の局面も勝率 50% として滑らかにブレンド (0.5 * 0.5 + 0.5 * result)
                 let score_prob = Self::sigmoid(entry.score as f32, k);
                 let target = 0.5 * score_prob + 0.5 * entry.result;
 
-                parsed_data.push((b_feats, w_feats, mat_black, pos.side_to_move, target));
+                parsed_data.push((mover_feats, opp_feats, mat_stm, target));
             }
         }
 
@@ -323,15 +360,11 @@ impl NNUETrainer {
 
         // 初期損失の計算
         let mut initial_loss = 0.0f32;
-        for (b_feats, w_feats, mat_black, turn, result) in &parsed_data {
-            let (residual_black, _, _, _, _) = self.forward(b_feats, w_feats);
-            let score_black = *mat_black as f32 + residual_black;
-            let score = match turn {
-                Color::Black => score_black,
-                Color::White => -score_black,
-            };
-            let pred = Self::sigmoid(score, k);
-            let err = pred - result;
+        for (mover_feats, opp_feats, mat_stm, target) in &parsed_data {
+            let (residual_stm, _, _, _, _, _) = self.forward(mover_feats, opp_feats);
+            let score_stm = *mat_stm as f32 + residual_stm;
+            let pred = Self::sigmoid(score_stm, k);
+            let err = pred - target;
             initial_loss += err * err;
         }
         initial_loss /= parsed_data.len() as f32;
@@ -341,7 +374,7 @@ impl NNUETrainer {
         let mut rng = crate::selfplay::SimpleRng::new(0xdeadbeefc0ffee);
 
         for _epoch in 0..epochs {
-            // エポックごとの Fisher-Yates シャッフル（ミニバッチ間の相関を解消）
+            // エポックごとの Fisher-Yates シャッフル
             let len = parsed_data.len();
             for i in (1..len).rev() {
                 let j = rng.gen_range(i + 1);

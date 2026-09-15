@@ -46,9 +46,10 @@ impl SEE {
         let mut current_pt = moved_piece_type;
         let mut side = pos.side_to_move.opposite();
 
-        // 最初の手の攻撃駒を除去
+        // 最初の手の攻撃駒を除去し、背後のX-ray利きを追加
         if let Some(from_sq) = mv.from() {
             attackers.retain(|&(sq, _)| sq != from_sq);
+            Self::add_xray_attackers(pos, from_sq, to_sq, &mut attackers);
         }
 
         while !attackers.is_empty() {
@@ -58,9 +59,12 @@ impl SEE {
                 d += 1;
                 // d手目で手番側が取る駒は直前の current_pt
                 gain[d] = current_pt.base_value();
-                let (_, piece) = attackers.remove(idx);
+                let (from_sq, piece) = attackers.remove(idx);
                 current_pt = piece.piece_type;
                 side = side.opposite();
+
+                // 駒が移動した背後のX-ray利きを追加
+                Self::add_xray_attackers(pos, from_sq, to_sq, &mut attackers);
             } else {
                 break;
             }
@@ -172,5 +176,55 @@ impl SEE {
             }
         }
         best_idx
+    }
+
+    /// 駒が離脱・捕獲されたマス `removed_sq` の背後に位置する遠距離駒 (飛・香・角・竜・馬) の
+    /// `target_sq` への新たな利き (X-ray attack) を探索し、`attackers` に追加する
+    fn add_xray_attackers(
+        pos: &Position,
+        removed_sq: Square,
+        target_sq: Square,
+        attackers: &mut Vec<(Square, Piece)>,
+    ) {
+        let df = target_sq.file() as i8 - removed_sq.file() as i8;
+        let dr = target_sq.rank() as i8 - removed_sq.rank() as i8;
+
+        let is_straight = (df == 0 && dr != 0) || (dr == 0 && df != 0);
+        let is_diagonal = df.abs() == dr.abs() && df != 0;
+
+        if !is_straight && !is_diagonal {
+            return;
+        }
+
+        let step_f = (removed_sq.file() as i8 - target_sq.file() as i8).signum();
+        let step_r = (removed_sq.rank() as i8 - target_sq.rank() as i8).signum();
+
+        let mut cf = removed_sq.file() as i8 + step_f;
+        let mut cr = removed_sq.rank() as i8 + step_r;
+
+        while (0..9).contains(&cf) && (0..9).contains(&cr) {
+            let sq = Square::new(cf as u8, cr as u8);
+            if let Some(p) = pos.board[sq.index()] {
+                let can_xray = match p.piece_type {
+                    PieceType::Rook | PieceType::Dragon => is_straight,
+                    PieceType::Bishop | PieceType::Horse => is_diagonal,
+                    PieceType::Lance => {
+                        df == 0
+                            && match p.color {
+                                Color::Black => step_r > 0,
+                                Color::White => step_r < 0,
+                            }
+                    }
+                    _ => false,
+                };
+
+                if can_xray && !attackers.iter().any(|&(a_sq, _)| a_sq == sq) {
+                    attackers.push((sq, p));
+                }
+                break;
+            }
+            cf += step_f;
+            cr += step_r;
+        }
     }
 }

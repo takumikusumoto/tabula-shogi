@@ -7,7 +7,8 @@ pub const NNUE_HIDDEN_SIZE: usize = 128; // 超高速推論のため128ノード
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_ADDEND: u64 = 1;
 
-pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN4";
+pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN5";
+pub const RESIDUAL_BOUND_CP: i32 = 300;
 
 /// スクラッチ設計の Residual Baseline NNUE 評価ネットワーク
 /// - ベースライン: 完全な盤上・持ち駒の駒割り (Material Balance)
@@ -18,10 +19,10 @@ pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN4";
 /// - 量子化: 16-bit 整数演算（SIMDフレンドリー）
 #[derive(Clone, Debug)]
 pub struct NNUEEvaluator {
-    pub(crate) feature_weights: Vec<[i16; NNUE_HIDDEN_SIZE]>,
-    pub(crate) feature_biases: [i16; NNUE_HIDDEN_SIZE],
-    pub(crate) output_weights: [i16; NNUE_HIDDEN_SIZE * 2],
-    pub(crate) output_bias: i32,
+    pub feature_weights: Vec<[i16; NNUE_HIDDEN_SIZE]>,
+    pub feature_biases: [i16; NNUE_HIDDEN_SIZE],
+    pub output_weights: [i16; NNUE_HIDDEN_SIZE * 2],
+    pub output_bias: i32,
 }
 
 impl Default for NNUEEvaluator {
@@ -278,6 +279,14 @@ impl NNUEEvaluator {
         mat
     }
 
+    /// 手番視点のマテリアル（駒割り）バランスを計算 (センチポーン単位)
+    pub fn material_stm(pos: &Position) -> i32 {
+        match pos.side_to_move {
+            Color::Black => Self::material_black(pos),
+            Color::White => -Self::material_black(pos),
+        }
+    }
+
     /// 特徴量インデックス列から先手視点のマテリアルバランスを復元
     /// (盤面 Position が直接利用できない場合のフォールバック・検証用)
     pub fn material_from_features(black_feats: &[usize]) -> i32 {
@@ -317,33 +326,34 @@ impl NNUEEvaluator {
 
     /// 評価値の推論 (Forward inference)
     /// 戻り値: センチポーン (cp) 単位の評価値 (手番視点)
-    /// 評価値 = 駒割りベースライン + NNUE 残差 (Residual)
+    /// 評価値 = 手番側駒割りベースライン + NNUE 有界残差 (Residual)
+    /// 手番中心 (Mover-first) 結合により、完全な手番対称性を保証
     pub fn evaluate(&self, pos: &Position) -> i32 {
-        let black_feats = Self::extract_features(pos, Color::Black);
-        let white_feats = Self::extract_features(pos, Color::White);
+        let mover = pos.side_to_move;
+        let opp = mover.opposite();
 
-        let black_acc = self.compute_accumulator(&black_feats);
-        let white_acc = self.compute_accumulator(&white_feats);
+        let mover_feats = Self::extract_features(pos, mover);
+        let opp_feats = Self::extract_features(pos, opp);
+
+        let mover_acc = self.compute_accumulator(&mover_feats);
+        let opp_acc = self.compute_accumulator(&opp_feats);
 
         let mut output = self.output_bias;
 
         // ClippedReLU(x) = clamp(x, 0, 64) (Float側 clamp(0.0, 1.0) * 64 と厳密整合)
         for i in 0..NNUE_HIDDEN_SIZE {
-            let b_val = black_acc[i].clamp(0, 64) as i32;
-            let w_val = white_acc[i].clamp(0, 64) as i32;
+            let m_val = mover_acc[i].clamp(0, 64) as i32;
+            let o_val = opp_acc[i].clamp(0, 64) as i32;
 
-            output += b_val * self.output_weights[i] as i32;
-            output += w_val * self.output_weights[NNUE_HIDDEN_SIZE + i] as i32;
+            output += m_val * self.output_weights[i] as i32;
+            output += o_val * self.output_weights[NNUE_HIDDEN_SIZE + i] as i32;
         }
 
         // 整数スケーリング: 重み項 (64 * 64) とバイアス項 (4096) を 16 で割ることで
         // Float 学習側 (score = output * 256.0) と数学的に 1 対 1 で完全一致
-        let residual_cp = output / 16;
-        let black_score = Self::material_black(pos) + residual_cp;
+        let raw_residual_cp = output / 16;
+        let residual_cp = raw_residual_cp.clamp(-RESIDUAL_BOUND_CP, RESIDUAL_BOUND_CP);
 
-        match pos.side_to_move {
-            Color::Black => black_score,
-            Color::White => -black_score,
-        }
+        Self::material_stm(pos) + residual_cp
     }
 }
