@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 pub struct LoopConfig {
     pub iterations: usize,
+    pub start_iteration: Option<usize>,
+    pub state_path: String,
     pub games_per_iteration: usize,
     pub eval_pairs: usize,
     pub threads: usize,
@@ -24,6 +26,8 @@ impl Default for LoopConfig {
     fn default() -> Self {
         Self {
             iterations: 3,
+            start_iteration: None,
+            state_path: "loop_state.txt".to_string(),
             games_per_iteration: 50,
             eval_pairs: 15,
             threads: 2,
@@ -109,16 +113,39 @@ impl SelfImprovementLoop {
             }
         };
 
-        for iter in 1..=config.iterations {
-            println!("\n>>> Generation {} / {} <<<", iter, config.iterations);
+        let start_gen = match config.start_iteration {
+            Some(s) => s,
+            None => {
+                if Path::new(&config.state_path).exists() {
+                    std::fs::read_to_string(&config.state_path)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                        .map(|last| last + 1)
+                        .unwrap_or(1)
+                } else {
+                    1
+                }
+            }
+        };
+        println!(
+            "Cumulative Generation Offset: Starting at Gen {}",
+            start_gen
+        );
+
+        for round in 1..=config.iterations {
+            let cur_gen = start_gen + round - 1;
+            println!(
+                "\n>>> Generation {} (Round {} / {}) <<<",
+                cur_gen, round, config.iterations
+            );
 
             // Step 1: 自己対局データ生成 (世代ごとにシードを多様化して局面重複を解消)
             println!(
                 "\n--- Step 1: Self-Play Data Generation ({} games) ---",
                 config.games_per_iteration
             );
-            let gen_seed =
-                0x9E3779B97F4A7C15u64.wrapping_add((iter as u64).wrapping_mul(0x517cc1b727220a95));
+            let gen_seed = 0x9E3779B97F4A7C15u64
+                .wrapping_add((cur_gen as u64).wrapping_mul(0x517cc1b727220a95));
             let sp_cfg = SelfPlayConfig {
                 num_games: config.games_per_iteration,
                 threads: config.threads,
@@ -165,7 +192,7 @@ impl SelfImprovementLoop {
             // Step 3: アリーナ対戦 & レーティング検定 (Candidate vs Best)
             println!("\n--- Step 3: Arena Match & SPRT Testing ---");
             let match_cfg = MatchConfig {
-                name_a: format!("Candidate_Gen{iter}"),
+                name_a: format!("Candidate_Gen{cur_gen}"),
                 name_b: "Best_Model".to_string(),
                 eval_a: EvalMode::Nnue(Arc::new(candidate_eval.clone())),
                 eval_b: current_best_eval.clone(),
@@ -187,19 +214,24 @@ impl SelfImprovementLoop {
 
             // Step 4: 昇格判定
             let promoted = Self::handle_promotion(
-                iter,
+                cur_gen,
                 &match_res,
                 &candidate_eval,
                 &mut current_best_eval,
                 &config.best_model_path,
             );
 
+            // 世代番号を永続化（次回再起動時に自動で直前世代から継続可能）
+            if let Err(e) = std::fs::write(&config.state_path, cur_gen.to_string()) {
+                eprintln!("Warning: Failed to persist generation state: {e}");
+            }
+
             if !promoted {
                 // 昇格しなかった場合:
                 // 王者がHCEの間はCandidateの学習進捗とAdam状態を絶対に破棄せず蓄積を継続する！
                 println!(
-                    "[Progression] Candidate did not beat champion in Gen {iter}. Retaining trained weights & Adam momentum for Gen {}.",
-                    iter + 1
+                    "[Progression] Candidate did not beat champion in Gen {cur_gen}. Retaining trained weights & Adam momentum for Gen {}.",
+                    cur_gen + 1
                 );
             }
         }

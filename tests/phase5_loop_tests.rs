@@ -91,12 +91,21 @@ fn test_autonomous_loop_single_iteration() {
         .unwrap()
         .to_string();
 
+    let state_path = temp_dir
+        .join("test_loop_state.txt")
+        .to_str()
+        .unwrap()
+        .to_string();
+
     let _ = fs::remove_file(&data_path);
     let _ = fs::remove_file(&best_path);
     let _ = fs::remove_file(&cand_path);
+    let _ = fs::remove_file(&state_path);
 
     let config = LoopConfig {
         iterations: 1,
+        start_iteration: Some(1),
+        state_path: state_path.clone(),
         games_per_iteration: 4,
         eval_pairs: 2,
         threads: 2,
@@ -124,4 +133,5 @@ fn test_autonomous_loop_single_iteration() {
     let _ = fs::remove_file(&data_path);
     let _ = fs::remove_file(&best_path);
     let _ = fs::remove_file(&cand_path);
+    let _ = fs::remove_file(&state_path);
 }

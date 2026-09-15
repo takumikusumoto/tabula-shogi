@@ -381,6 +381,18 @@ fn run_loop(args: &[String]) {
                     i += 1;
                 }
             }
+            "--start-iter" => {
+                if i + 1 < args.len() {
+                    config.start_iteration = args[i + 1].parse().ok();
+                    i += 1;
+                }
+            }
+            "--state" => {
+                if i + 1 < args.len() {
+                    config.state_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
             "--help" | "-h" => {
                 println!("TabulaShogi Autonomous Self-Improvement Loop");
                 println!("USAGE:\n    tabula-shogi loop [OPTIONS]");
