@@ -104,14 +104,14 @@ impl SearchEngine {
             }
         }
 
-        // 2. 詰み探索 (df-pn Solver: 王手時または玉周辺に敵駒が迫っている危機局面のみ実行)
-        let in_check = pos.is_in_check(pos.side_to_move);
-        let king_sq = pos.king_sq[pos.side_to_move.index()];
-        let near_king_threat = king_sq.map_or(false, |ks| {
-            let opp = pos.side_to_move.opposite();
+        // 2. 手番側が相手玉を攻められる局面で詰み探索を実行する。
+        let us = pos.side_to_move;
+        let opp = us.opposite();
+        let opp_king_sq = pos.king_sq[opp.index()];
+        let near_king_threat = opp_king_sq.is_some_and(|ks| {
             (0..81).any(|sq_idx| {
                 if let Some(p) = pos.board[sq_idx] {
-                    if p.color == opp {
+                    if p.color == us {
                         let sq = crate::types::Square::from_index(sq_idx);
                         let file_diff = (sq.file() as i8 - ks.file() as i8).abs();
                         let rank_diff = (sq.rank() as i8 - ks.rank() as i8).abs();
@@ -122,7 +122,10 @@ impl SearchEngine {
             })
         });
 
-        if in_check || near_king_threat {
+        if near_king_threat
+            || pos.is_in_check(opp)
+            || !MoveGenerator::generate_checks(pos).is_empty()
+        {
             let mut dfpn = super::dfpn::DfpnSolver::new(5_000);
             let (is_mate, mate_move) = dfpn.solve(pos);
             if is_mate && let Some(mv) = mate_move {
