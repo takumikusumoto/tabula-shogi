@@ -172,6 +172,11 @@ impl DatasetHandler {
     /// - depth: 探索深さ (例: 4)
     /// - threads: 並行スレッド数 (例: 4)
     pub fn relabel_deep(entries: &mut [DatasetEntry], count: usize, depth: u8, threads: usize) {
+        // 深さ0の探索による無意味・危険な上書きを即座に拒否
+        if depth == 0 {
+            return;
+        }
+
         let target_len = count.min(entries.len());
         if target_len == 0 {
             return;
@@ -181,6 +186,7 @@ impl DatasetHandler {
         let chunk_size = (target_len + num_threads - 1) / num_threads;
 
         let slice_to_relabel = &mut entries[..target_len];
+        let min_required_depth = 2.min(depth);
 
         std::thread::scope(|s| {
             for chunk in slice_to_relabel.chunks_mut(chunk_size) {
@@ -188,13 +194,16 @@ impl DatasetHandler {
                     let mut engine = crate::search::SearchEngine::new(4);
                     engine.eval_mode = crate::eval::EvalMode::Hce;
                     engine.max_nodes = Some(30_000); // 1局面最大3万ノードで確実に打ち切り、ハング・長時間スタックを完全防止
+                    engine.use_book = false; // 深読み再評価では定跡手をスキップし、純粋な深さNの探索評価値を算出
 
                     for entry in chunk {
                         if let Ok(mut pos) = crate::board::Position::from_sfen(&entry.sfen) {
-                            let res = engine.search_fixed_depth_detail(&mut pos, depth);
-                            // 要求深さに達した（または深さ2以上の有意な探索が完了した）場合のみラベルを更新
-                            if res.completed_depth >= 2.min(depth) {
-                                entry.score = res.score;
+                            let outcome = engine.search_fixed_depth_outcome(&mut pos, depth);
+                            // 定跡(Book)や中断(Aborted)による破壊的0上書き・不完全上書きを型レベルで完全排除
+                            if let Some(reliable_score) =
+                                outcome.reliable_score_for_relabel(min_required_depth)
+                            {
+                                entry.score = reliable_score;
                             }
                         }
                     }

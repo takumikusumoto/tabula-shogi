@@ -77,3 +77,51 @@ fn fixed_depth_detail_tracks_completed_depth_accurately() {
     assert_eq!(partial_res.best_move, ref_res.best_move);
     assert_eq!(partial_res.score, ref_res.score);
 }
+
+#[test]
+fn search_outcome_prevents_book_zero_overwrite_and_tracks_abort() {
+    use tabula_shogi::search::SearchOutcome;
+    use tabula_shogi::selfplay::{DatasetEntry, DatasetHandler};
+
+    // 平手初期局面 (定跡OpeningBookが確実にヒットする局面)
+    let mut start_pos =
+        Position::from_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap();
+    let mut engine = SearchEngine::new(1);
+
+    // 1. use_book: true の場合、定跡ヒット時は SearchOutcome::Book が返り、reliable_score_for_relabel は None を返す
+    let outcome = engine.search_fixed_depth_outcome(&mut start_pos, 4);
+    match outcome {
+        SearchOutcome::Book { best_move } => {
+            assert_eq!(best_move.to_usi(), "7g7f");
+            assert_eq!(outcome.reliable_score_for_relabel(2), None);
+        }
+        _ => panic!(
+            "Expected SearchOutcome::Book on startpos, got {:?}",
+            outcome
+        ),
+    }
+
+    // 2. relabel_deep では engine.use_book = false により定跡手をスキップし、純粋な深さ探索値で再評価される
+    let mut entries = vec![DatasetEntry {
+        sfen: start_pos.to_sfen(),
+        score: 9999,
+        result: 1.0,
+        move_usi: "7g7f".to_string(),
+    }];
+
+    // depth: 1 で再評価を実行すると、初期局面が深さ1で探索され、9999 から正常に更新される
+    DatasetHandler::relabel_deep(&mut entries, 1, 1, 1);
+    assert_ne!(
+        entries[0].score, 9999,
+        "relabel_deep must compute real search score without book bypass"
+    );
+
+    // 3. depth: 0 で再評価を実行した場合はガードによりスコアが維持される
+    let cur_score = entries[0].score;
+    DatasetHandler::relabel_deep(&mut entries, 1, 0, 1);
+    assert_eq!(
+        entries[0].score, cur_score,
+        "depth=0 must NOT overwrite label!"
+    );
+}
