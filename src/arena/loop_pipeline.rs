@@ -270,21 +270,16 @@ impl SelfImprovementLoop {
         current_best_eval: &mut EvalMode,
         best_model_path: &str,
     ) -> bool {
-        // 昇格条件: SPRT が Pass（統計的有意に強い）、または固定対局数終了時に勝率55%超
+        // 昇格条件: SPRT が Pass（統計的有意に強い）ことのみを要求し、サンプル分散による偶発的昇格を排除
         let sprt_passed = match_res
             .sprt
             .as_ref()
             .map(|s| s.status == SprtStatus::Pass)
             .unwrap_or(false);
-        let clear_win = match_res.win_rate_a >= 0.55;
 
-        let promoted = sprt_passed || clear_win;
+        let promoted = sprt_passed;
         if promoted {
-            let reason = if sprt_passed {
-                "SPRT Pass"
-            } else {
-                "WinRate >= 55%"
-            };
+            let reason = "SPRT Pass (Statistically Significant Superiority)";
             println!(
                 "\n>>> [PROMOTION] Gen {} Candidate won ({}) with {:.1}% win rate ({:+.1} Elo). Promoting to Best Model! <<<",
                 iter,
