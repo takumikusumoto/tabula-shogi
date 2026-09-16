@@ -30,6 +30,7 @@ pub struct SearchEngine {
     pub(crate) counter_moves: [[Option<Move>; 81]; 81],
     pub(crate) history: [[i32; 81]; 81],
     pub eval_mode: crate::eval::EvalMode,
+    pub max_nodes: Option<u64>,
 }
 
 impl SearchEngine {
@@ -41,6 +42,7 @@ impl SearchEngine {
             counter_moves: [[None; 81]; 81],
             history: [[0; 81]; 81],
             eval_mode: crate::eval::EvalMode::Hce,
+            max_nodes: None,
         };
         engine.reset_heuristics();
         engine
@@ -59,6 +61,7 @@ impl SearchEngine {
             counter_moves: [[None; 81]; 81],
             history: [[0; 81]; 81],
             eval_mode: crate::eval::EvalMode::Hce,
+            max_nodes: None,
         };
         engine.reset_heuristics();
         engine
@@ -101,11 +104,30 @@ impl SearchEngine {
             }
         }
 
-        // 2. 詰み探索 (df-pn Solver)
-        let mut dfpn = super::dfpn::DfpnSolver::new(20_000);
-        let (is_mate, mate_move) = dfpn.solve(pos);
-        if is_mate && let Some(mv) = mate_move {
-            return (Some(mv), MATE_SCORE - 1);
+        // 2. 詰み探索 (df-pn Solver: 王手時または玉周辺に敵駒が迫っている危機局面のみ実行)
+        let in_check = pos.is_in_check(pos.side_to_move);
+        let king_sq = pos.king_sq[pos.side_to_move.index()];
+        let near_king_threat = king_sq.map_or(false, |ks| {
+            let opp = pos.side_to_move.opposite();
+            (0..81).any(|sq_idx| {
+                if let Some(p) = pos.board[sq_idx] {
+                    if p.color == opp {
+                        let sq = crate::types::Square::from_index(sq_idx);
+                        let file_diff = (sq.file() as i8 - ks.file() as i8).abs();
+                        let rank_diff = (sq.rank() as i8 - ks.rank() as i8).abs();
+                        return file_diff <= 2 && rank_diff <= 2;
+                    }
+                }
+                false
+            })
+        });
+
+        if in_check || near_king_threat {
+            let mut dfpn = super::dfpn::DfpnSolver::new(5_000);
+            let (is_mate, mate_move) = dfpn.solve(pos);
+            if is_mate && let Some(mv) = mate_move {
+                return (Some(mv), MATE_SCORE - 1);
+            }
         }
 
         self.nodes = 0;
@@ -603,13 +625,24 @@ impl SearchEngine {
         allow_null: bool,
         ctx: &SearchContext,
     ) -> i32 {
-        // 定期的な時間チェック
+        // 定期的な時間チェック & ノード数制限チェック
         self.nodes += 1;
+        if let Some(max_n) = self.max_nodes {
+            if self.nodes >= max_n {
+                ctx.stop_flag.store(true, Ordering::Relaxed);
+                return self.evaluate(pos);
+            }
+        }
         if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
             ctx.stop_flag.store(true, Ordering::Relaxed);
         }
         if ctx.stop_flag.load(Ordering::Relaxed) {
             return 0;
+        }
+
+        // 最大探索手数 (MAX_PLY) ガード
+        if ply >= 64 {
+            return self.evaluate(pos);
         }
 
         // 千日手判定
@@ -619,8 +652,8 @@ impl SearchEngine {
 
         let in_check = pos.is_in_check(pos.side_to_move);
 
-        // Check Extension (王手延長: 王手がかかっているときは深さを維持)
-        if in_check {
+        // Check Extension (王手延長: 王手がかかっているときは深さを維持、ただし手数・深さ制限)
+        if in_check && depth < 20 && ply < 32 {
             depth += 1;
         }
 
