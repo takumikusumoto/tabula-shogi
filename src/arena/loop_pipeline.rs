@@ -212,12 +212,13 @@ impl SelfImprovementLoop {
 
             // Step 3: アリーナ対戦 & レーティング検定 (Candidate vs Best)
             println!("\n--- Step 3: Arena Match & SPRT Testing ---");
-            let match_cfg = MatchConfig {
+            let mut current_pairs = config.eval_pairs;
+            let mut match_cfg = MatchConfig {
                 name_a: format!("Candidate_Gen{cur_gen}"),
                 name_b: "Best_Model".to_string(),
                 eval_a: EvalMode::Nnue(Arc::new(candidate_eval.clone())),
                 eval_b: current_best_eval.clone(),
-                pairs: config.eval_pairs,
+                pairs: current_pairs,
                 depth: config.depth,
                 threads: config.threads,
                 random_opening: 6,
@@ -225,13 +226,35 @@ impl SelfImprovementLoop {
                 tt_size_mb: 16,
                 sprt_config: Some(SprtConfig {
                     elo0: 0.0,
-                    elo1: 5.0,
+                    elo1: 50.0,
                     alpha: 0.05,
                     beta: 0.05,
                 }),
             };
 
-            let match_res = MatchRunner::run_match(&match_cfg);
+            let mut match_res = MatchRunner::run_match(&match_cfg);
+
+            // SPRT判定が Continue かつ勝ち越し傾向 (勝率52%以上) の場合、
+            // 小標本による誤否決を防ぎ統計的有意性を確定させるため最大3倍 (例: 120局) まで動的に延長対局
+            let max_pairs = config.eval_pairs * 3;
+            while let Some(ref sprt) = match_res.sprt {
+                if sprt.status == SprtStatus::Continue
+                    && match_res.win_rate_a >= 0.52
+                    && current_pairs < max_pairs
+                {
+                    current_pairs += config.eval_pairs;
+                    println!(
+                        "\n[SPRT Overtime] Indecisive Continue with positive win rate {:.1}% (LLR: {:.2}). Extending to {} pairs for statistical confirmation...",
+                        match_res.win_rate_a * 100.0,
+                        sprt.llr,
+                        current_pairs
+                    );
+                    match_cfg.pairs = current_pairs;
+                    match_res = MatchRunner::run_match(&match_cfg);
+                } else {
+                    break;
+                }
+            }
 
             // Step 4: 昇格判定
             let promoted = Self::handle_promotion(
