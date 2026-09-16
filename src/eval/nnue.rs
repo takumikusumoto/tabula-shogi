@@ -8,7 +8,7 @@ const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_ADDEND: u64 = 1;
 
 pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN5";
-pub const RESIDUAL_BOUND_CP: i32 = 300;
+pub const RESIDUAL_BOUND_CP: i32 = 600;
 
 /// スクラッチ設計の Residual Baseline NNUE 評価ネットワーク
 /// - ベースライン: 完全な盤上・持ち駒の駒割り (Material Balance)
@@ -324,19 +324,99 @@ impl NNUEEvaluator {
         mat
     }
 
+    /// 盤面から先手・後手視点のアキュムレータを単一パス・ゼロアロケーションで直接計算
+    #[inline]
+    pub fn compute_accumulators_direct(
+        &self,
+        pos: &Position,
+    ) -> ([i16; NNUE_HIDDEN_SIZE], [i16; NNUE_HIDDEN_SIZE]) {
+        let mut b_acc = self.feature_biases;
+        let mut w_acc = self.feature_biases;
+
+        // 盤上の駒
+        for sq_idx in 0..81 {
+            if let Some(piece) = pos.board[sq_idx] {
+                let sq = Square::from_index(sq_idx);
+                let pt_idx = piece.piece_type.index();
+
+                // 先手視点 (Black)
+                let b_mapped_sq = sq.index();
+                let b_color_offset = if piece.color == Color::Black { 0 } else { 14 };
+                let b_feat = b_mapped_sq * 28 + pt_idx + b_color_offset;
+                if b_feat < NNUE_INPUT_SIZE {
+                    let w_slice = &self.feature_weights[b_feat];
+                    for i in 0..NNUE_HIDDEN_SIZE {
+                        b_acc[i] = b_acc[i].saturating_add(w_slice[i]);
+                    }
+                }
+
+                // 後手視点 (White, 点対称反転)
+                let w_mapped_sq = (8 - sq.file() as usize) * 9 + (8 - sq.rank() as usize);
+                let w_color_offset = if piece.color == Color::White { 0 } else { 14 };
+                let w_feat = w_mapped_sq * 28 + pt_idx + w_color_offset;
+                if w_feat < NNUE_INPUT_SIZE {
+                    let w_slice = &self.feature_weights[w_feat];
+                    for i in 0..NNUE_HIDDEN_SIZE {
+                        w_acc[i] = w_acc[i].saturating_add(w_slice[i]);
+                    }
+                }
+            }
+        }
+
+        // 持ち駒 (先手視点: 自軍=Black, 敵軍=White / 後手視点: 自軍=White, 敵軍=Black)
+        let mut b_hand_base = 81 * 28;
+        let mut w_hand_base = 81 * 28;
+
+        for c_self in [true, false] {
+            let (b_color, w_color) = if c_self {
+                (Color::Black, Color::White)
+            } else {
+                (Color::White, Color::Black)
+            };
+
+            for pt in PieceType::HAND_PIECES {
+                if let Some(h_idx) = pt.hand_index() {
+                    let b_count = pos.hand[b_color.index()][h_idx] as usize;
+                    for k in 0..b_count.min(18) {
+                        let feat = b_hand_base + k;
+                        if feat < NNUE_INPUT_SIZE {
+                            let w_slice = &self.feature_weights[feat];
+                            for i in 0..NNUE_HIDDEN_SIZE {
+                                b_acc[i] = b_acc[i].saturating_add(w_slice[i]);
+                            }
+                        }
+                    }
+
+                    let w_count = pos.hand[w_color.index()][h_idx] as usize;
+                    for k in 0..w_count.min(18) {
+                        let feat = w_hand_base + k;
+                        if feat < NNUE_INPUT_SIZE {
+                            let w_slice = &self.feature_weights[feat];
+                            for i in 0..NNUE_HIDDEN_SIZE {
+                                w_acc[i] = w_acc[i].saturating_add(w_slice[i]);
+                            }
+                        }
+                    }
+
+                    b_hand_base += 18;
+                    w_hand_base += 18;
+                }
+            }
+        }
+
+        (b_acc, w_acc)
+    }
+
     /// 評価値の推論 (Forward inference)
     /// 戻り値: センチポーン (cp) 単位の評価値 (手番視点)
     /// 評価値 = 手番側駒割りベースライン + NNUE 有界残差 (Residual)
     /// 手番中心 (Mover-first) 結合により、完全な手番対称性を保証
     pub fn evaluate(&self, pos: &Position) -> i32 {
-        let mover = pos.side_to_move;
-        let opp = mover.opposite();
-
-        let mover_feats = Self::extract_features(pos, mover);
-        let opp_feats = Self::extract_features(pos, opp);
-
-        let mover_acc = self.compute_accumulator(&mover_feats);
-        let opp_acc = self.compute_accumulator(&opp_feats);
+        let (b_acc, w_acc) = self.compute_accumulators_direct(pos);
+        let (mover_acc, opp_acc) = match pos.side_to_move {
+            Color::Black => (&b_acc, &w_acc),
+            Color::White => (&w_acc, &b_acc),
+        };
 
         let mut output = self.output_bias;
 
