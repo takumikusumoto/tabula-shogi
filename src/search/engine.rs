@@ -183,13 +183,13 @@ impl SearchEngine {
         let opp_king_sq = pos.king_sq[opp.index()];
         let near_king_threat = opp_king_sq.is_some_and(|ks| {
             (0..81).any(|sq_idx| {
-                if let Some(p) = pos.board[sq_idx] {
-                    if p.color == us {
-                        let sq = crate::types::Square::from_index(sq_idx);
-                        let file_diff = (sq.file() as i8 - ks.file() as i8).abs();
-                        let rank_diff = (sq.rank() as i8 - ks.rank() as i8).abs();
-                        return file_diff <= 2 && rank_diff <= 2;
-                    }
+                if let Some(p) = pos.board[sq_idx]
+                    && p.color == us
+                {
+                    let sq = crate::types::Square::from_index(sq_idx);
+                    let file_diff = (sq.file() as i8 - ks.file() as i8).abs();
+                    let rank_diff = (sq.rank() as i8 - ks.rank() as i8).abs();
+                    return file_diff <= 2 && rank_diff <= 2;
                 }
                 false
             })
@@ -420,10 +420,10 @@ impl SearchEngine {
         let best_score = scored_moves.iter().map(|(_, s)| *s).max().unwrap_or(-INF);
 
         // 詰みスコアがある場合は最善手を即採用
-        if best_score >= MATE_SCORE - 200 {
-            if let Some(&(best_mv, score)) = scored_moves.iter().find(|(_, s)| *s == best_score) {
-                return (Some(best_mv), score);
-            }
+        if best_score >= MATE_SCORE - 200
+            && let Some(&(best_mv, score)) = scored_moves.iter().find(|(_, s)| *s == best_score)
+        {
+            return (Some(best_mv), score);
         }
 
         // 温度スケーリング (歩1枚 = 100cp を基準とする)
@@ -762,11 +762,11 @@ impl SearchEngine {
     ) -> i32 {
         // 定期的な時間チェック & ノード数制限チェック
         self.nodes += 1;
-        if let Some(max_n) = self.max_nodes {
-            if self.nodes >= max_n {
-                ctx.stop_flag.store(true, Ordering::Relaxed);
-                return self.evaluate(pos);
-            }
+        if let Some(max_n) = self.max_nodes
+            && self.nodes >= max_n
+        {
+            ctx.stop_flag.store(true, Ordering::Relaxed);
+            return self.evaluate(pos);
         }
         if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
             ctx.stop_flag.store(true, Ordering::Relaxed);

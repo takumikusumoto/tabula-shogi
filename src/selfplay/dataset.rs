@@ -183,7 +183,7 @@ impl DatasetHandler {
         }
 
         let num_threads = threads.clamp(1, 64).min(target_len);
-        let chunk_size = (target_len + num_threads - 1) / num_threads;
+        let chunk_size = target_len.div_ceil(num_threads);
 
         let slice_to_relabel = &mut entries[..target_len];
         let min_required_depth = 2.min(depth);

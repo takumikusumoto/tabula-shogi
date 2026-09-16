@@ -18,7 +18,7 @@ fn main() {
     let reader = BufReader::new(file);
 
     let mut dataset = Vec::with_capacity(10_000);
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if let Some(entry) = DatasetHandler::parse_entry(&line) {
             dataset.push(entry);
             if dataset.len() >= 10_000 {

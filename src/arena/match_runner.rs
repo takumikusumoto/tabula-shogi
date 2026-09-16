@@ -81,10 +81,10 @@ impl MatchRunner {
             };
 
         let target_pairs = target_pairs.max(start_pair);
-        if start_pair >= target_pairs {
-            if let Some(prev) = previous_result {
-                return prev.clone();
-            }
+        if start_pair >= target_pairs
+            && let Some(prev) = previous_result
+        {
+            return prev.clone();
         }
 
         let num_threads = config.threads.max(1);

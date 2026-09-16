@@ -150,18 +150,16 @@ fn main() {
 
     let mut sampled_positions: Vec<(Position, i32, f32)> = Vec::new();
     let mut total_lines = 0;
-    for line in reader.lines() {
-        if let Ok(l) = line {
-            total_lines += 1;
-            if total_lines % 480 == 0 && sampled_positions.len() < 1000 {
-                let parts: Vec<&str> = l.split('\t').collect();
-                if parts.len() >= 3 {
-                    if let Ok(pos) = Position::from_sfen(parts[0]) {
-                        let score: i32 = parts[1].parse().unwrap_or(0);
-                        let result: f32 = parts[2].parse().unwrap_or(0.5);
-                        sampled_positions.push((pos, score, result));
-                    }
-                }
+    for l in reader.lines().map_while(Result::ok) {
+        total_lines += 1;
+        if total_lines % 480 == 0 && sampled_positions.len() < 1000 {
+            let parts: Vec<&str> = l.split('\t').collect();
+            if parts.len() >= 3
+                && let Ok(pos) = Position::from_sfen(parts[0])
+            {
+                let score: i32 = parts[1].parse().unwrap_or(0);
+                let result: f32 = parts[2].parse().unwrap_or(0.5);
+                sampled_positions.push((pos, score, result));
             }
         }
     }
