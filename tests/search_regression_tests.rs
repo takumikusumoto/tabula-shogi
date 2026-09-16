@@ -102,26 +102,53 @@ fn search_outcome_prevents_book_zero_overwrite_and_tracks_abort() {
         ),
     }
 
-    // 2. relabel_deep では engine.use_book = false により定跡手をスキップし、純粋な深さ探索値で再評価される
+    // 2. 定跡無効の直接探索期待値を算出
+    let mut direct_engine = SearchEngine::new(1);
+    direct_engine.use_book = false;
+    let direct_outcome = direct_engine.search_fixed_depth_outcome(&mut start_pos, 1);
+    let expected_direct_score = match direct_outcome {
+        SearchOutcome::Completed { score, .. } => score,
+        _ => panic!("Expected Completed outcome for direct search"),
+    };
+
+    // 3. relabel_deep では engine.use_book = false により定跡手をスキップし、
+    //    直接探索期待値と完全に一致する実値で再評価される (0 への誤更新ではないことを厳密検証)
     let mut entries = vec![DatasetEntry {
         sfen: start_pos.to_sfen(),
         score: 9999,
         result: 1.0,
         move_usi: "7g7f".to_string(),
     }];
-
-    // depth: 1 で再評価を実行すると、初期局面が深さ1で探索され、9999 から正常に更新される
     DatasetHandler::relabel_deep(&mut entries, 1, 1, 1);
-    assert_ne!(
-        entries[0].score, 9999,
-        "relabel_deep must compute real search score without book bypass"
+    assert_eq!(
+        entries[0].score, expected_direct_score,
+        "relabel_deep must exactly match direct search score without book zero contamination"
     );
 
-    // 3. depth: 0 で再評価を実行した場合はガードによりスコアが維持される
+    // 4. depth: 0 で再評価を実行した場合はガードによりスコアが維持される
     let cur_score = entries[0].score;
     DatasetHandler::relabel_deep(&mut entries, 1, 0, 1);
     assert_eq!(
         entries[0].score, cur_score,
         "depth=0 must NOT overwrite label!"
     );
+
+    // 5. SearchOutcome::Aborted (ノード上限による中断) では reliable_score_for_relabel が None を返し、
+    //    深読み再評価でラベルが破壊されないことを直接検証
+    let mut abort_engine = SearchEngine::new(1);
+    abort_engine.use_book = false;
+    abort_engine.max_nodes = Some(1); // 深さ1の最初で即座に打ち切り
+    let abort_outcome = abort_engine.search_fixed_depth_outcome(&mut start_pos, 2);
+    match abort_outcome {
+        SearchOutcome::Aborted {
+            completed_depth, ..
+        } => {
+            assert_eq!(completed_depth, 0);
+            assert_eq!(abort_outcome.reliable_score_for_relabel(2), None);
+        }
+        _ => panic!(
+            "Expected SearchOutcome::Aborted on max_nodes=1, got {:?}",
+            abort_outcome
+        ),
+    }
 }

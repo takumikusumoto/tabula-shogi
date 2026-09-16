@@ -213,7 +213,7 @@ impl SelfImprovementLoop {
             // Step 3: アリーナ対戦 & レーティング検定 (Candidate vs Best)
             println!("\n--- Step 3: Arena Match & SPRT Testing ---");
             let mut current_pairs = config.eval_pairs;
-            let mut match_cfg = MatchConfig {
+            let match_cfg = MatchConfig {
                 name_a: format!("Candidate_Gen{cur_gen}"),
                 name_b: "Best_Model".to_string(),
                 eval_a: EvalMode::Nnue(Arc::new(candidate_eval.clone())),
@@ -244,13 +244,16 @@ impl SelfImprovementLoop {
                 {
                     current_pairs += config.eval_pairs;
                     println!(
-                        "\n[SPRT Overtime] Indecisive Continue with positive win rate {:.1}% (LLR: {:.2}). Extending to {} pairs for statistical confirmation...",
+                        "\n[SPRT Overtime] Indecisive Continue with positive win rate {:.1}% (LLR: {:.2}). Incrementally extending to {} pairs...",
                         match_res.win_rate_a * 100.0,
                         sprt.llr,
                         current_pairs
                     );
-                    match_cfg.pairs = current_pairs;
-                    match_res = MatchRunner::run_match(&match_cfg);
+                    match_res = MatchRunner::run_match_extended(
+                        &match_cfg,
+                        Some(&match_res),
+                        current_pairs,
+                    );
                 } else {
                     break;
                 }

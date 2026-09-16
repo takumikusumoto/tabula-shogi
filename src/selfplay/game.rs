@@ -167,8 +167,21 @@ impl GameRunner {
                     }
                 }
             } else {
-                // 探索による最善手
-                let (best_mv, eval_score) = engine.search_fixed_depth(&mut pos, config.depth);
+                // 探索による最善手 (SearchOutcome による型分離)
+                let outcome = engine.search_fixed_depth_outcome(&mut pos, config.depth);
+                let best_mv = outcome.best_move();
+                let eval_score = match outcome {
+                    crate::search::SearchOutcome::Book { .. } => {
+                        // 定跡手の場合はスコア0で汚染せず、エンジンの静的評価値を初期ラベルとして付与
+                        engine.evaluate(&pos)
+                    }
+                    crate::search::SearchOutcome::Completed { score, .. } => score,
+                    crate::search::SearchOutcome::Aborted { fallback_score, .. } => fallback_score,
+                    crate::search::SearchOutcome::MateProven { score, .. } => score,
+                    crate::search::SearchOutcome::NoLegalMoves => {
+                        -crate::search::engine::MATE_SCORE
+                    }
+                };
                 match best_mv {
                     Some(mv) => (mv, eval_score),
                     None => {

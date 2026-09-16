@@ -57,31 +57,76 @@ pub struct MatchRunner;
 impl MatchRunner {
     /// 2つのモデル間の先後交代ペアマッチを並列実行
     pub fn run_match(config: &MatchConfig) -> MatchResult {
+        Self::run_match_extended(config, None, config.pairs)
+    }
+
+    /// 既存の検定状態（勝敗、SPRT、進行ペア番号）を引き継ぎ、追加ペア分だけを実行して累積集計する
+    pub fn run_match_extended(
+        config: &MatchConfig,
+        previous_result: Option<&MatchResult>,
+        target_pairs: usize,
+    ) -> MatchResult {
+        let (start_pair, initial_wins_a, initial_wins_b, initial_draws, prev_sprt) =
+            if let Some(prev) = previous_result {
+                let s_pair = (prev.wins_a + prev.wins_b + prev.draws) / 2;
+                (
+                    s_pair,
+                    prev.wins_a,
+                    prev.wins_b,
+                    prev.draws,
+                    prev.sprt.clone(),
+                )
+            } else {
+                (0, 0, 0, 0, None)
+            };
+
+        let target_pairs = target_pairs.max(start_pair);
+        if start_pair >= target_pairs {
+            if let Some(prev) = previous_result {
+                return prev.clone();
+            }
+        }
+
         let num_threads = config.threads.max(1);
-        let pairs_total = config.pairs.max(1);
+        let pairs_total = target_pairs;
 
-        let pair_counter = Arc::new(AtomicUsize::new(0));
-        let finished_counter = Arc::new(AtomicUsize::new(0));
+        let pair_counter = Arc::new(AtomicUsize::new(start_pair));
+        let finished_counter = Arc::new(AtomicUsize::new(start_pair));
 
-        let wins_a_total = Arc::new(AtomicUsize::new(0));
-        let wins_b_total = Arc::new(AtomicUsize::new(0));
-        let draws_total = Arc::new(AtomicUsize::new(0));
+        let wins_a_total = Arc::new(AtomicUsize::new(initial_wins_a));
+        let wins_b_total = Arc::new(AtomicUsize::new(initial_wins_b));
+        let draws_total = Arc::new(AtomicUsize::new(initial_draws));
 
-        let sprt_tracker = config
-            .sprt_config
-            .as_ref()
-            .map(|sc| Arc::new(Mutex::new(Sprt::new(sc.clone()))));
+        let sprt_tracker = if let Some(ps) = prev_sprt {
+            Some(Arc::new(Mutex::new(ps)))
+        } else {
+            config
+                .sprt_config
+                .as_ref()
+                .map(|sc| Arc::new(Mutex::new(Sprt::new(sc.clone()))))
+        };
 
-        println!("=== TabulaShogi Arena Match ===");
-        println!(
-            "{} vs {} | Pairs: {} (Games: {}), Threads: {}, Depth: {}",
-            config.name_a,
-            config.name_b,
-            pairs_total,
-            pairs_total * 2,
-            num_threads,
-            config.depth
-        );
+        if start_pair == 0 {
+            println!("=== TabulaShogi Arena Match ===");
+            println!(
+                "{} vs {} | Pairs: {} (Games: {}), Threads: {}, Depth: {}",
+                config.name_a,
+                config.name_b,
+                pairs_total,
+                pairs_total * 2,
+                num_threads,
+                config.depth
+            );
+        } else {
+            println!(
+                "\n--- Incremental Overtime: Pairs {} -> {} (Games {} -> {}), Threads: {} ---",
+                start_pair,
+                pairs_total,
+                start_pair * 2,
+                pairs_total * 2,
+                num_threads
+            );
+        }
         println!("--------------------------------------");
 
         thread::scope(|s| {
