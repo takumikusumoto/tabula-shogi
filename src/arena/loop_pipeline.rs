@@ -219,22 +219,24 @@ impl SelfImprovementLoop {
             let relabel_count = 5_000.min(dataset.len());
             let relabel_depth = config.depth.saturating_add(2); // Depth 2 -> Depth 4
             let t_relabel = std::time::Instant::now();
-            DatasetHandler::relabel_deep(
+            let successful_relabelled = DatasetHandler::relabel_deep(
                 &mut dataset,
                 relabel_count,
                 relabel_depth,
                 config.threads,
             );
             println!(
-                "IIZ Distillation: Re-evaluated top {} positions at Depth {} in {:.2}s",
+                "IIZ Distillation: Successfully re-evaluated {}/{} positions at Depth {} in {:.2}s",
+                successful_relabelled.len(),
                 relabel_count,
                 relabel_depth,
                 t_relabel.elapsed().as_secs_f64()
             );
 
-            // 深読み再評価結果を専用プールファイルに原子的に蓄積・永続化 (毎世代の成果を累積)
-            if let Err(e) =
-                DatasetHandler::append_to_file(&config.deep_data_path, &dataset[..relabel_count])
+            // 探索が正常完了した真の深読み教師局面のみを永続プールファイルに追記 (未完了・中断の混入を完全排除)
+            if !successful_relabelled.is_empty()
+                && let Err(e) =
+                    DatasetHandler::append_to_file(&config.deep_data_path, &successful_relabelled)
             {
                 eprintln!("Warning: Failed to persist deep relabeled pool: {e}");
             }

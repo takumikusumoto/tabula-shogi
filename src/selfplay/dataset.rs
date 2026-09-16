@@ -213,19 +213,21 @@ impl DatasetHandler {
     }
 
     /// サンプリングされたデータセットのうち指定件数をマルチスレッドで深い探索 (Depth 4等) により再評価 (IIZ / 知識蒸留)
-    /// - entries: 再評価対象のデータセット
-    /// - count: 再評価する局面数 (先頭から count 件、例: 10,000)
-    /// - depth: 探索深さ (例: 4)
-    /// - threads: 並行スレッド数 (例: 4)
-    pub fn relabel_deep(entries: &mut [DatasetEntry], count: usize, depth: u8, threads: usize) {
+    /// 戻り値: 深読み再評価が正常完了（または詰み証明）された高品質エントリのリスト（未完了・中断は含まれない）
+    pub fn relabel_deep(
+        entries: &mut [DatasetEntry],
+        count: usize,
+        depth: u8,
+        threads: usize,
+    ) -> Vec<DatasetEntry> {
         // 深さ0の探索による無意味・危険な上書きを即座に拒否
         if depth == 0 {
-            return;
+            return Vec::new();
         }
 
         let target_len = count.min(entries.len());
         if target_len == 0 {
-            return;
+            return Vec::new();
         }
 
         let num_threads = threads.clamp(1, 64).min(target_len);
@@ -233,14 +235,17 @@ impl DatasetHandler {
 
         let slice_to_relabel = &mut entries[..target_len];
         let min_required_depth = 2.min(depth);
+        let successful_entries = std::sync::Mutex::new(Vec::with_capacity(target_len));
 
         std::thread::scope(|s| {
             for chunk in slice_to_relabel.chunks_mut(chunk_size) {
-                s.spawn(move || {
+                s.spawn(|| {
                     let mut engine = crate::search::SearchEngine::new(4);
                     engine.eval_mode = crate::eval::EvalMode::Hce;
                     engine.max_nodes = Some(30_000); // 1局面最大3万ノードで確実に打ち切り、ハング・長時間スタックを完全防止
                     engine.use_book = false; // 深読み再評価では定跡手をスキップし、純粋な深さNの探索評価値を算出
+
+                    let mut local_successes = Vec::new();
 
                     for entry in chunk {
                         if let Ok(mut pos) = crate::board::Position::from_sfen(&entry.sfen) {
@@ -250,11 +255,19 @@ impl DatasetHandler {
                                 outcome.reliable_score_for_relabel(min_required_depth)
                             {
                                 entry.score = reliable_score;
+                                local_successes.push(entry.clone());
                             }
                         }
+                    }
+
+                    if !local_successes.is_empty() {
+                        let mut lock = successful_entries.lock().unwrap();
+                        lock.extend(local_successes);
                     }
                 });
             }
         });
+
+        successful_entries.into_inner().unwrap()
     }
 }
