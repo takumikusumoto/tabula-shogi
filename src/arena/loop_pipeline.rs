@@ -18,6 +18,7 @@ pub struct LoopConfig {
     pub lr: f32,
     pub batch_size: usize,
     pub data_path: String,
+    pub deep_data_path: String,
     pub best_model_path: String,
     pub candidate_model_path: String,
 }
@@ -36,6 +37,7 @@ impl Default for LoopConfig {
             lr: 0.001,
             batch_size: 64,
             data_path: "loop_dataset.tsv".to_string(),
+            deep_data_path: "deep_dataset.tsv".to_string(),
             best_model_path: "best_nnue.bin".to_string(),
             candidate_model_path: "candidate_nnue.bin".to_string(),
         }
@@ -161,14 +163,20 @@ impl SelfImprovementLoop {
 
             // Step 2: データセット読込 & IIZ 深読み再評価 & 継続 NNUE 学習
             println!("\n--- Step 2: Training Candidate Model from Dataset (IIZ Distillation) ---");
-            let mut dataset =
-                match DatasetHandler::load_sampled(&config.data_path, 100_000, 0.5, gen_seed) {
-                    Ok(d) if !d.is_empty() => d,
-                    _ => {
-                        println!("Warning: No dataset found or empty, skipping iteration.");
-                        continue;
-                    }
-                };
+            let mut dataset = match DatasetHandler::load_sampled_with_deep_pool(
+                &config.data_path,
+                Some(&config.deep_data_path),
+                100_000,
+                0.5,
+                0.5,
+                gen_seed,
+            ) {
+                Ok(d) if !d.is_empty() => d,
+                _ => {
+                    println!("Warning: No dataset found or empty, skipping iteration.");
+                    continue;
+                }
+            };
 
             // やねうら王流 IIZ (多重反復雑巾絞り): 最新サンプリングのうち 5,000 局面を Depth 4 で深読み再評価
             let relabel_count = 5_000.min(dataset.len());
@@ -186,6 +194,13 @@ impl SelfImprovementLoop {
                 relabel_depth,
                 t_relabel.elapsed().as_secs_f64()
             );
+
+            // 深読み再評価結果を専用プールファイルに原子的に蓄積・永続化 (毎世代の成果を累積)
+            if let Err(e) =
+                DatasetHandler::append_to_file(&config.deep_data_path, &dataset[..relabel_count])
+            {
+                eprintln!("Warning: Failed to persist deep relabeled pool: {e}");
+            }
 
             println!(
                 "Sampled {} training positions (50% recent / 50% history). Training for {} epochs...",

@@ -96,8 +96,14 @@ fn test_autonomous_loop_single_iteration() {
         .to_str()
         .unwrap()
         .to_string();
+    let deep_data_path = temp_dir
+        .join("test_deep_dataset.tsv")
+        .to_str()
+        .unwrap()
+        .to_string();
 
     let _ = fs::remove_file(&data_path);
+    let _ = fs::remove_file(&deep_data_path);
     let _ = fs::remove_file(&best_path);
     let _ = fs::remove_file(&cand_path);
     let _ = fs::remove_file(&state_path);
@@ -114,6 +120,7 @@ fn test_autonomous_loop_single_iteration() {
         lr: 0.01,
         batch_size: 16,
         data_path: data_path.clone(),
+        deep_data_path: deep_data_path.clone(),
         best_model_path: best_path.clone(),
         candidate_model_path: cand_path.clone(),
     };
@@ -131,6 +138,7 @@ fn test_autonomous_loop_single_iteration() {
     );
 
     let _ = fs::remove_file(&data_path);
+    let _ = fs::remove_file(&deep_data_path);
     let _ = fs::remove_file(&best_path);
     let _ = fs::remove_file(&cand_path);
     let _ = fs::remove_file(&state_path);

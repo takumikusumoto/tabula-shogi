@@ -381,6 +381,12 @@ fn run_loop(args: &[String]) {
                     i += 1;
                 }
             }
+            "--deep-data" => {
+                if i + 1 < args.len() {
+                    config.deep_data_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
             "--start-iter" => {
                 if i + 1 < args.len() {
                     config.start_iteration = args[i + 1].parse().ok();

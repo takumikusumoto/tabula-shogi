@@ -166,6 +166,52 @@ impl DatasetHandler {
         Ok(result)
     }
 
+    /// 深読みプールを優先してサンプリングするデータローダー
+    /// - main_path: 通常の自己対局データ（loop_dataset.tsv）
+    /// - deep_path: 永続化された深読み再評価データ（deep_dataset.tsv）
+    /// - total_sample: 抽出する総局面数 (例: 100,000)
+    /// - deep_ratio: 深読みデータの目標比率 (例: 0.5 = 最大5万件を深読みデータから優先抽出)
+    /// - recent_ratio: 通常データ枠における最新局面比率 (例: 0.5)
+    pub fn load_sampled_with_deep_pool(
+        main_path: &str,
+        deep_path: Option<&str>,
+        total_sample: usize,
+        deep_ratio: f64,
+        recent_ratio: f64,
+        seed: u64,
+    ) -> io::Result<Vec<DatasetEntry>> {
+        let mut deep_entries = Vec::new();
+        let target_deep = ((total_sample as f64) * deep_ratio).round() as usize;
+
+        if let Some(dp) = deep_path
+            && std::path::Path::new(dp).exists()
+            && let Ok(loaded) = Self::load_sampled(dp, target_deep, 0.5, seed)
+        {
+            deep_entries = loaded;
+        }
+
+        let remaining = total_sample.saturating_sub(deep_entries.len());
+        let mut main_entries = if remaining > 0 && std::path::Path::new(main_path).exists() {
+            Self::load_sampled(main_path, remaining, recent_ratio, seed.wrapping_add(1))?
+        } else {
+            Vec::new()
+        };
+
+        let mut combined = deep_entries;
+        combined.append(&mut main_entries);
+
+        // 全体をインプレースでシャッフル (Fisher-Yates)
+        if combined.len() > 1 {
+            let mut rng = SimpleRng::new(if seed == 0 { 0xdeadbeefcafe } else { seed });
+            for i in (1..combined.len()).rev() {
+                let j = rng.gen_range(i + 1);
+                combined.swap(i, j);
+            }
+        }
+
+        Ok(combined)
+    }
+
     /// サンプリングされたデータセットのうち指定件数をマルチスレッドで深い探索 (Depth 4等) により再評価 (IIZ / 知識蒸留)
     /// - entries: 再評価対象のデータセット
     /// - count: 再評価する局面数 (先頭から count 件、例: 10,000)
