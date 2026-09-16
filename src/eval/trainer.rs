@@ -346,9 +346,9 @@ impl NNUETrainer {
                 let opp_feats = NNUEEvaluator::extract_features(&pos, opp);
                 let mat_stm = NNUEEvaluator::material_stm(&pos);
 
-                // 探索評価値と最終勝敗を等しく重み付けし、勝敗への接地を維持する。
+                // 探索評価値（深読み教師）に主軸を置き(90%)、浅い対局outcomeの過剰影響を抑制(10%)
                 let score_prob = Self::sigmoid(entry.score as f32, k);
-                let target = 0.50 * score_prob + 0.50 * entry.result;
+                let target = 0.90 * score_prob + 0.10 * entry.result;
 
                 parsed_data.push((mover_feats, opp_feats, mat_stm, target));
             }

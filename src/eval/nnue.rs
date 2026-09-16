@@ -8,7 +8,7 @@ const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_ADDEND: u64 = 1;
 
 pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN5";
-pub const RESIDUAL_BOUND_CP: i32 = 600;
+pub const RESIDUAL_BOUND_CP: i32 = 25_000;
 
 /// スクラッチ設計の Residual Baseline NNUE 評価ネットワーク
 /// - ベースライン: 完全な盤上・持ち駒の駒割り (Material Balance)

@@ -377,9 +377,9 @@ fn test_nnue_turn_symmetry() {
 
 #[test]
 fn test_nnue_residual_strictly_bounded() {
-    // 極端な重みを持つ評価器を作成して、残差が必ず [-600, 600] にクリップされることを検証
+    // 極端な重みを持つ評価器を作成して、残差が必ず [-RESIDUAL_BOUND_CP, RESIDUAL_BOUND_CP] にクリップされることを検証
     let mut evaluator = NNUEEvaluator::new();
-    evaluator.output_bias = 100_000; // 巨大なバイアス
+    evaluator.output_bias = 1_000_000; // 巨大なバイアス (1_000_000 / 16 = 62_500 > 25_000)
 
     let pos = Position::startpos();
     let mat_stm = NNUEEvaluator::material_stm(&pos);
@@ -388,15 +388,15 @@ fn test_nnue_residual_strictly_bounded() {
 
     assert_eq!(
         residual, RESIDUAL_BOUND_CP,
-        "Residual must be clamped to max bound +600 cp even with huge positive bias"
+        "Residual must be clamped to max bound +25000 cp even with huge positive bias"
     );
 
-    evaluator.output_bias = -100_000;
+    evaluator.output_bias = -1_000_000;
     let eval_neg = evaluator.evaluate(&pos);
     let residual_neg = eval_neg - mat_stm;
     assert_eq!(
         residual_neg, -RESIDUAL_BOUND_CP,
-        "Residual must be clamped to min bound -600 cp even with huge negative bias"
+        "Residual must be clamped to min bound -25000 cp even with huge negative bias"
     );
 }
 
