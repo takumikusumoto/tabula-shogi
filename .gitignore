@@ -9,4 +9,5 @@
 *.log
 *.err
 loop_state.txt
+*.bak
 
