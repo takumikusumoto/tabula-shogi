@@ -9,6 +9,7 @@ const LCG_ADDEND: u64 = 1;
 
 pub const NNUE_MAGIC: &[u8; 8] = b"TABU_NN5";
 pub const RESIDUAL_BOUND_CP: i32 = 25_000;
+pub const MAX_EVAL_CP: i32 = 27_000; // 詰み判定域(29,800cp〜)と厳密に分離された通常局面の最大値
 
 /// スクラッチ設計の Residual Baseline NNUE 評価ネットワーク
 /// - ベースライン: 完全な盤上・持ち駒の駒割り (Material Balance)
@@ -434,6 +435,6 @@ impl NNUEEvaluator {
         let raw_residual_cp = output / 16;
         let residual_cp = raw_residual_cp.clamp(-RESIDUAL_BOUND_CP, RESIDUAL_BOUND_CP);
 
-        Self::material_stm(pos) + residual_cp
+        (Self::material_stm(pos) + residual_cp).clamp(-MAX_EVAL_CP, MAX_EVAL_CP)
     }
 }

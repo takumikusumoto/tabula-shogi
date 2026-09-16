@@ -1,7 +1,7 @@
 use std::fs;
 use std::sync::Arc;
 use tabula_shogi::board::Position;
-use tabula_shogi::eval::{EvalMode, NNUEEvaluator, NNUETrainer, RESIDUAL_BOUND_CP};
+use tabula_shogi::eval::{EvalMode, MAX_EVAL_CP, NNUEEvaluator, NNUETrainer, RESIDUAL_BOUND_CP};
 use tabula_shogi::search::SearchEngine;
 use tabula_shogi::selfplay::dataset::DatasetEntry;
 use tabula_shogi::usi::UsiHandler;
@@ -422,5 +422,43 @@ fn test_see_xray_battery_attack() {
     assert_eq!(
         see_val, 100,
         "SEE with X-ray must evaluate battery capture as +100 cp, but got {see_val}"
+    );
+}
+
+#[test]
+fn test_nnue_total_score_clamped_strictly_below_mate_zone() {
+    let mut evaluator = NNUEEvaluator::new();
+    // 極端な巨大バイアスを与えて残差を +25,000cp に張り付かせる
+    evaluator.output_bias = 1_000_000;
+
+    // 先手大駒得局面 (飛車・角・金・銀・桂・香・歩多数を先手の手駒に追加)
+    let mut pos = Position::startpos();
+    pos.hand[tabula_shogi::types::Color::Black.index()]
+        [tabula_shogi::types::PieceType::Rook.hand_index().unwrap()] += 2;
+    pos.hand[tabula_shogi::types::Color::Black.index()]
+        [tabula_shogi::types::PieceType::Bishop.hand_index().unwrap()] += 2;
+    pos.hand[tabula_shogi::types::Color::Black.index()]
+        [tabula_shogi::types::PieceType::Gold.hand_index().unwrap()] += 4;
+
+    let mat_stm = NNUEEvaluator::material_stm(&pos);
+    assert!(mat_stm > 4000, "Material advantage must be > 4000 cp");
+
+    let eval = evaluator.evaluate(&pos);
+    assert_eq!(
+        eval, MAX_EVAL_CP,
+        "Total eval with huge material + residual must be clamped to MAX_EVAL_CP ({MAX_EVAL_CP}), but got {eval}"
+    );
+    assert!(
+        eval < 28_000,
+        "Total eval must be strictly below mate detection boundary (28,000 cp)"
+    );
+
+    // 後手大差局面
+    pos.side_to_move = tabula_shogi::types::Color::White;
+    evaluator.output_bias = -1_000_000;
+    let eval_white = evaluator.evaluate(&pos);
+    assert_eq!(
+        eval_white, -MAX_EVAL_CP,
+        "Total eval with huge disadvantage must be clamped to -MAX_EVAL_CP, but got {eval_white}"
     );
 }

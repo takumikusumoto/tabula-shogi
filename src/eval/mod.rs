@@ -3,7 +3,7 @@ pub mod nnue;
 pub mod trainer;
 
 pub use evaluator::{EvalBreakdown, Evaluator};
-pub use nnue::{NNUEEvaluator, RESIDUAL_BOUND_CP};
+pub use nnue::{MAX_EVAL_CP, NNUEEvaluator, RESIDUAL_BOUND_CP};
 pub use trainer::NNUETrainer;
 
 use crate::board::Position;
