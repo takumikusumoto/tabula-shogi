@@ -139,15 +139,20 @@ impl SelfImprovementLoop {
                 cur_gen, round, config.iterations
             );
 
-            // Step 1: 自己対局データ生成 (世代ごとにシードを多様化して局面重複を解消)
+            // Step 1: 自己対局データ生成 (Champion 80局 + Candidate 40局 のハイブリッド生成)
+            let champ_games = (config.games_per_iteration * 2) / 3;
+            let cand_games = config.games_per_iteration.saturating_sub(champ_games);
+
             println!(
-                "\n--- Step 1: Self-Play Data Generation ({} games) ---",
-                config.games_per_iteration
+                "\n--- Step 1: Self-Play Data Generation ({} games: {} Champion + {} Candidate) ---",
+                config.games_per_iteration, champ_games, cand_games
             );
             let gen_seed = 0x9E3779B97F4A7C15u64
                 .wrapping_add((cur_gen as u64).wrapping_mul(0x517cc1b727220a95));
-            let sp_cfg = SelfPlayConfig {
-                num_games: config.games_per_iteration,
+
+            // 1-A: 王者 (HCE) による堅牢な定石・指し手データの生成
+            let sp_cfg_champ = SelfPlayConfig {
+                num_games: champ_games,
                 threads: config.threads,
                 depth: config.depth,
                 data_output: Some(config.data_path.clone()),
@@ -155,19 +160,53 @@ impl SelfImprovementLoop {
                 seed: gen_seed,
                 ..Default::default()
             };
-            SelfPlayManager::run(sp_cfg);
+            SelfPlayManager::run(sp_cfg_champ);
 
-            // Step 2: データセット読込 & 継続(Warm-start) NNUE 学習
-            println!("\n--- Step 2: Training Candidate Model from Dataset (Warm-start) ---");
-            let dataset = match DatasetHandler::load_from_file(&config.data_path) {
-                Ok(d) if !d.is_empty() => d,
-                _ => {
-                    println!("Warning: No dataset found or empty, skipping iteration.");
-                    continue;
-                }
-            };
+            // 1-B: 候補 NNUE による自己対局 (自身の悪手・弱点局面をデータに供給し自律修復)
+            if cand_games > 0 {
+                let cand_eval = trainer.quantize();
+                let sp_cfg_cand = SelfPlayConfig {
+                    num_games: cand_games,
+                    threads: config.threads,
+                    depth: config.depth,
+                    data_output: Some(config.data_path.clone()),
+                    eval_mode: EvalMode::Nnue(Arc::new(cand_eval)),
+                    seed: gen_seed.wrapping_add(0xbf58476d1ce4e5b9),
+                    ..Default::default()
+                };
+                SelfPlayManager::run(sp_cfg_cand);
+            }
+
+            // Step 2: データセット読込 & IIZ 深読み再評価 & 継続 NNUE 学習
+            println!("\n--- Step 2: Training Candidate Model from Dataset (IIZ Distillation) ---");
+            let mut dataset =
+                match DatasetHandler::load_sampled(&config.data_path, 100_000, 0.5, gen_seed) {
+                    Ok(d) if !d.is_empty() => d,
+                    _ => {
+                        println!("Warning: No dataset found or empty, skipping iteration.");
+                        continue;
+                    }
+                };
+
+            // やねうら王流 IIZ (多重反復雑巾絞り): 最新サンプリングのうち 5,000 局面を Depth 4 で深読み再評価
+            let relabel_count = 5_000.min(dataset.len());
+            let relabel_depth = config.depth.saturating_add(2); // Depth 2 -> Depth 4
+            let t_relabel = std::time::Instant::now();
+            DatasetHandler::relabel_deep(
+                &mut dataset,
+                relabel_count,
+                relabel_depth,
+                config.threads,
+            );
             println!(
-                "Loaded {} training positions. Training for {} epochs...",
+                "IIZ Distillation: Re-evaluated top {} positions at Depth {} in {:.2}s",
+                relabel_count,
+                relabel_depth,
+                t_relabel.elapsed().as_secs_f64()
+            );
+
+            println!(
+                "Sampled {} training positions (50% recent / 50% history). Training for {} epochs...",
                 dataset.len(),
                 config.epochs
             );

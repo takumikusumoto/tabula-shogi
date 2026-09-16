@@ -346,9 +346,9 @@ impl NNUETrainer {
                 let opp_feats = NNUEEvaluator::extract_features(&pos, opp);
                 let mat_stm = NNUEEvaluator::material_stm(&pos);
 
-                // 探索評価値（知識蒸留）と最終勝敗のハイブリッド教師信号
+                // 探索評価値（知識蒸留）と最終勝敗のハイブリッド教師信号 (Lambda = 0.75: 深読み探索評価値を最重視)
                 let score_prob = Self::sigmoid(entry.score as f32, k);
-                let target = 0.5 * score_prob + 0.5 * entry.result;
+                let target = 0.75 * score_prob + 0.25 * entry.result;
 
                 parsed_data.push((mover_feats, opp_feats, mat_stm, target));
             }
