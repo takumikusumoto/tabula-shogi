@@ -191,8 +191,11 @@ impl DatasetHandler {
 
                     for entry in chunk {
                         if let Ok(mut pos) = crate::board::Position::from_sfen(&entry.sfen) {
-                            let (_, deep_score) = engine.search_fixed_depth(&mut pos, depth);
-                            entry.score = deep_score;
+                            let res = engine.search_fixed_depth_detail(&mut pos, depth);
+                            // 要求深さに達した（または深さ2以上の有意な探索が完了した）場合のみラベルを更新
+                            if res.completed_depth >= 2.min(depth) {
+                                entry.score = res.score;
+                            }
                         }
                     }
                 });

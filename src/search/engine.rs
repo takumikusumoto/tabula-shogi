@@ -18,6 +18,14 @@ const REVERSE_FUTILITY_MARGIN: i32 = 120; // depth あたり
 const FUTILITY_MARGIN: i32 = 180;
 pub(crate) const MATE_SCORE_TT_MARGIN: i32 = 500;
 
+/// 探索結果の詳細（最善手、評価値、および実際に完了した反復深化の深さ）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchResult {
+    pub best_move: Option<Move>,
+    pub score: i32,
+    pub completed_depth: u8,
+}
+
 pub struct SearchContext<'a> {
     pub time_mgr: &'a TimeManager,
     pub stop_flag: &'a Arc<AtomicBool>,
@@ -90,17 +98,21 @@ impl SearchEngine {
         self.reset_heuristics();
     }
 
-    /// 自己対局用の固定深さ探索 (USI標準出力を行わず、最善手と探索スコアを返却)
-    pub fn search_fixed_depth(
+    /// 自己対局・再評価用の固定深さ詳細探索 (USI標準出力を行わず、最善手、探索スコア、完了深度を返却)
+    pub fn search_fixed_depth_detail(
         &mut self,
         pos: &mut Position,
         target_depth: u8,
-    ) -> (Option<Move>, i32) {
+    ) -> SearchResult {
         // 1. 定跡データベースの照会
         if let Some(book_move) = OpeningBook::probe(pos) {
             let legal_moves = MoveGenerator::generate_legal_moves(pos);
             if legal_moves.contains(&book_move) {
-                return (Some(book_move), 0);
+                return SearchResult {
+                    best_move: Some(book_move),
+                    score: 0,
+                    completed_depth: target_depth,
+                };
             }
         }
 
@@ -129,7 +141,11 @@ impl SearchEngine {
             let mut dfpn = super::dfpn::DfpnSolver::new(5_000);
             let (is_mate, mate_move) = dfpn.solve(pos);
             if is_mate && let Some(mv) = mate_move {
-                return (Some(mv), MATE_SCORE - 1);
+                return SearchResult {
+                    best_move: Some(mv),
+                    score: MATE_SCORE - 1,
+                    completed_depth: target_depth.max(1),
+                };
             }
         }
 
@@ -147,12 +163,17 @@ impl SearchEngine {
 
         let mut root_moves = MoveGenerator::generate_legal_moves(pos);
         if root_moves.is_empty() {
-            return (None, -MATE_SCORE);
+            return SearchResult {
+                best_move: None,
+                score: -MATE_SCORE,
+                completed_depth: target_depth,
+            };
         }
 
         let mut best_move = root_moves[0];
         // 深さ1すら完了しなかった場合の安全なフォールバック。
         let mut best_score = self.evaluate(pos);
+        let mut completed_depth = 0;
 
         'deepening: for depth in 1..=target_depth {
             let mut alpha = -INF;
@@ -235,12 +256,28 @@ impl SearchEngine {
                 Some(best_move),
             );
 
+            completed_depth = depth;
+
             if best_score.abs() >= MATE_SCORE - 100 {
                 break;
             }
         }
 
-        (Some(best_move), best_score)
+        SearchResult {
+            best_move: Some(best_move),
+            score: best_score,
+            completed_depth,
+        }
+    }
+
+    /// 自己対局用の固定深さ探索 (USI標準出力を行わず、最善手と探索スコアを返却)
+    pub fn search_fixed_depth(
+        &mut self,
+        pos: &mut Position,
+        target_depth: u8,
+    ) -> (Option<Move>, i32) {
+        let res = self.search_fixed_depth_detail(pos, target_depth);
+        (res.best_move, res.score)
     }
 
     /// 各合法手の浅い探索評価値に基づき、ソフトマックス温度サンプリングによって着手を選択する
