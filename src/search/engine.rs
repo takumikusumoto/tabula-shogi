@@ -452,10 +452,10 @@ impl SearchEngine {
         let r_val = (rng_seed as f64) / (u64::MAX as f64);
         let mut target = (r_val as f32) * total_weight;
 
-        for (i, &(mv, score)) in scored_moves.iter().enumerate() {
+        for (i, &(mv, _score)) in scored_moves.iter().enumerate() {
             target -= weights[i];
             if target <= 0.0 {
-                return (Some(mv), score);
+                return (Some(mv), best_score);
             }
         }
 
@@ -1037,6 +1037,12 @@ impl SearchEngine {
         ctx: &SearchContext,
     ) -> i32 {
         self.nodes += 1;
+        if let Some(max_n) = self.max_nodes
+            && self.nodes >= max_n
+        {
+            ctx.stop_flag.store(true, Ordering::Relaxed);
+            return self.evaluate(pos);
+        }
         if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
             ctx.stop_flag.store(true, Ordering::Relaxed);
         }
