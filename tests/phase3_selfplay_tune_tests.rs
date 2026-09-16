@@ -198,3 +198,54 @@ fn test_texel_tuning_convergence() {
         assert!(v >= 10.0);
     }
 }
+
+#[test]
+fn test_dataset_load_sampled() {
+    let tmp_path = "test_sampled_dataset.tsv";
+    let pos_start = Position::startpos();
+
+    // 100件のテスト用エントリーを作成
+    let mut entries = Vec::new();
+    for i in 1..=100 {
+        entries.push(DatasetEntry {
+            sfen: pos_start.to_sfen(),
+            score: i,
+            result: if i % 2 == 0 { 1.0 } else { 0.0 },
+            move_usi: "7g7f".to_string(),
+        });
+    }
+
+    DatasetHandler::append_to_file(tmp_path, &entries).expect("Write test dataset");
+
+    // 20件サンプリング (最新50% = 10件, 過去50% = 10件)
+    let sampled =
+        DatasetHandler::load_sampled(tmp_path, 20, 0.5, 12345).expect("Load sampled dataset");
+
+    assert_eq!(sampled.len(), 20, "Should sample exactly 20 entries");
+
+    // クリーンアップ
+    let _ = std::fs::remove_file(tmp_path);
+}
+
+#[test]
+fn test_dataset_relabel_deep() {
+    let pos_start = Position::startpos();
+    let mut entries = vec![
+        DatasetEntry {
+            sfen: pos_start.to_sfen(),
+            score: 9999,
+            result: 0.5,
+            move_usi: "7g7f".to_string(),
+        };
+        4
+    ];
+
+    DatasetHandler::relabel_deep(&mut entries, 4, 1, 2);
+
+    for entry in &entries {
+        assert_ne!(
+            entry.score, 9999,
+            "Score should be re-evaluated and updated"
+        );
+    }
+}

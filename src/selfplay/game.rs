@@ -142,7 +142,8 @@ impl GameRunner {
                 if let Some(bm) = book_sample
                     && legal_moves.contains(&bm)
                 {
-                    (bm, 0)
+                    let eval = engine.evaluate(&pos);
+                    (bm, eval)
                 } else {
                     // 定跡外の場合は温度付きソフトマックスサンプリング (ボルツマン探査)
                     // 1〜10手目: T = 1.0 (有力手の中で柔軟に分岐)

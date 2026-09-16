@@ -1,5 +1,6 @@
-use super::game::GameRecord;
+use super::game::{GameRecord, SimpleRng};
 use crate::types::Color;
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 
@@ -103,5 +104,99 @@ impl DatasetHandler {
         }
 
         Ok(entries)
+    }
+
+    /// データセットから最新世代および過去履歴をバランスよくサンプリングして読み込み
+    /// - total_sample: 抽出する総局面数 (例: 100,000)
+    /// - recent_ratio: 最新局面の比率 (例: 0.5 = 50% 最新, 50% 過去)
+    /// - メモリ使用量は sample_size に制限され、ファイル全体の巨大アロケーションを防止
+    pub fn load_sampled(
+        path: &str,
+        total_sample: usize,
+        recent_ratio: f64,
+        seed: u64,
+    ) -> io::Result<Vec<DatasetEntry>> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+
+        let recent_target = ((total_sample as f64) * recent_ratio).round() as usize;
+        let history_target = total_sample.saturating_sub(recent_target);
+
+        let mut recent_queue = VecDeque::with_capacity(recent_target);
+        let mut history_samples = Vec::with_capacity(history_target);
+        let mut history_count = 0usize;
+        let mut rng = SimpleRng::new(if seed == 0 { 0xdeadbeefcafe } else { seed });
+
+        for line in reader.lines() {
+            let l = line?;
+            if let Some(entry) = Self::parse_entry(&l) {
+                if recent_queue.len() < recent_target {
+                    recent_queue.push_back(entry);
+                } else {
+                    // 最新バッファからあふれた最古の要素が過去プールに流入
+                    let displaced = recent_queue.pop_front().unwrap();
+                    recent_queue.push_back(entry);
+
+                    history_count += 1;
+                    if history_samples.len() < history_target {
+                        history_samples.push(displaced);
+                    } else {
+                        // リザーバサンプリング (一様確率で置換)
+                        let j = rng.gen_range(history_count);
+                        if j < history_target {
+                            history_samples[j] = displaced;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 過去プールと最新バッファを統合
+        let mut result = history_samples;
+        result.extend(recent_queue);
+
+        // ミニバッチ学習のバイアスを防ぐため、全体をインプレースでシャッフル (Fisher-Yates)
+        if result.len() > 1 {
+            for i in (1..result.len()).rev() {
+                let j = rng.gen_range(i + 1);
+                result.swap(i, j);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// サンプリングされたデータセットのうち指定件数をマルチスレッドで深い探索 (Depth 4等) により再評価 (IIZ / 知識蒸留)
+    /// - entries: 再評価対象のデータセット
+    /// - count: 再評価する局面数 (先頭から count 件、例: 10,000)
+    /// - depth: 探索深さ (例: 4)
+    /// - threads: 並行スレッド数 (例: 4)
+    pub fn relabel_deep(entries: &mut [DatasetEntry], count: usize, depth: u8, threads: usize) {
+        let target_len = count.min(entries.len());
+        if target_len == 0 {
+            return;
+        }
+
+        let num_threads = threads.clamp(1, 64).min(target_len);
+        let chunk_size = (target_len + num_threads - 1) / num_threads;
+
+        let slice_to_relabel = &mut entries[..target_len];
+
+        std::thread::scope(|s| {
+            for chunk in slice_to_relabel.chunks_mut(chunk_size) {
+                s.spawn(move || {
+                    let mut engine = crate::search::SearchEngine::new(4);
+                    engine.eval_mode = crate::eval::EvalMode::Hce;
+                    engine.max_nodes = Some(30_000); // 1局面最大3万ノードで確実に打ち切り、ハング・長時間スタックを完全防止
+
+                    for entry in chunk {
+                        if let Ok(mut pos) = crate::board::Position::from_sfen(&entry.sfen) {
+                            let (_, deep_score) = engine.search_fixed_depth(&mut pos, depth);
+                            entry.score = deep_score;
+                        }
+                    }
+                });
+            }
+        });
     }
 }
