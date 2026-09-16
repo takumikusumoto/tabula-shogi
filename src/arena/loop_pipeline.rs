@@ -141,17 +141,22 @@ impl SelfImprovementLoop {
                 cur_gen, round, config.iterations
             );
 
-            // Step 1: 全局を王者同士で生成し、未昇格の候補モデルを混入させない。
-            println!(
-                "\n--- Step 1: Self-Play Data Generation ({} Champion games) ---",
-                config.games_per_iteration
-            );
+            // Step 1: 自己対局データ生成 (Policy Mismatch / OOD 解消のため Champion 50% / Candidate 50% 混合)
+            // 候補モデルが存在する場合は、Candidate による自己対局を 50% 混ぜて未知の局面・疑問手を収集し、
+            // Step 2 の深読み教師 (Depth 4) で再評価・矯正する (DAgger-like 探索データ統合)
+            let half_games = config.games_per_iteration / 2;
+            let champ_games = config.games_per_iteration - half_games;
             let gen_seed = 0x9E3779B97F4A7C15u64
                 .wrapping_add((cur_gen as u64).wrapping_mul(0x517cc1b727220a95));
 
-            // 王者（初期状態ではHCE）による自己対局データの生成。
+            println!(
+                "\n--- Step 1: Self-Play Data Generation ({} Champion games + {} Candidate exploration games) ---",
+                champ_games, half_games
+            );
+
+            // 王者による自己対局
             let sp_cfg_champ = SelfPlayConfig {
-                num_games: config.games_per_iteration,
+                num_games: champ_games,
                 threads: config.threads,
                 depth: config.depth,
                 data_output: Some(config.data_path.clone()),
@@ -160,6 +165,38 @@ impl SelfImprovementLoop {
                 ..Default::default()
             };
             SelfPlayManager::run(sp_cfg_champ);
+
+            // 候補モデル（Candidate NNUE）による探査自己対局（存在する場合）
+            let candidate_eval_opt = if Path::new(&config.candidate_model_path).exists() {
+                NNUEEvaluator::load_from_file(&config.candidate_model_path).ok()
+            } else {
+                None
+            };
+
+            if let Some(cand_eval) = candidate_eval_opt {
+                let sp_cfg_cand = SelfPlayConfig {
+                    num_games: half_games,
+                    threads: config.threads,
+                    depth: config.depth,
+                    data_output: Some(config.data_path.clone()),
+                    eval_mode: EvalMode::Nnue(Arc::new(cand_eval)),
+                    seed: gen_seed.wrapping_add(0x85ebca6b),
+                    ..Default::default()
+                };
+                SelfPlayManager::run(sp_cfg_cand);
+            } else if half_games > 0 {
+                // 初回等でCandidateが存在しない場合はChampionで全数補完
+                let sp_cfg_fallback = SelfPlayConfig {
+                    num_games: half_games,
+                    threads: config.threads,
+                    depth: config.depth,
+                    data_output: Some(config.data_path.clone()),
+                    eval_mode: current_best_eval.clone(),
+                    seed: gen_seed.wrapping_add(0x85ebca6b),
+                    ..Default::default()
+                };
+                SelfPlayManager::run(sp_cfg_fallback);
+            }
 
             // Step 2: データセット読込 & IIZ 深読み再評価 & 継続 NNUE 学習
             println!("\n--- Step 2: Training Candidate Model from Dataset (IIZ Distillation) ---");
