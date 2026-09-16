@@ -151,9 +151,10 @@ impl SearchEngine {
         }
 
         let mut best_move = root_moves[0];
-        let mut best_score = -INF;
+        // 深さ1すら完了しなかった場合の安全なフォールバック。
+        let mut best_score = self.evaluate(pos);
 
-        for depth in 1..=target_depth {
+        'deepening: for depth in 1..=target_depth {
             let mut alpha = -INF;
             let mut beta = INF;
 
@@ -184,6 +185,11 @@ impl SearchEngine {
                     pos.do_move(mv);
                     let score = -self.negamax(pos, depth - 1, -beta, -current_alpha, 1, true, &ctx);
                     pos.undo_move();
+
+                    // 中断した深さの結果は採用せず、ルートTTにも保存しない。
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break 'deepening;
+                    }
 
                     if score > current_alpha {
                         current_alpha = score;
