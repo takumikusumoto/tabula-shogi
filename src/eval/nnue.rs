@@ -86,10 +86,10 @@ impl NNUEEvaluator {
 
         let mut quantized_out = [0i16; NNUE_HIDDEN_SIZE * 2];
         for (w, &f) in quantized_out.iter_mut().zip(output_weights.iter()) {
-            *w = (f * 64.0).clamp(-127.0, 127.0).round() as i16;
+            *w = (f * 512.0).clamp(-32767.0, 32767.0).round() as i16;
         }
 
-        let quantized_out_bias = (output_bias * 4096.0).round() as i32;
+        let quantized_out_bias = (output_bias * 32768.0).round() as i32;
 
         NNUEEvaluator {
             feature_weights: quantized_feats,
@@ -430,9 +430,9 @@ impl NNUEEvaluator {
             output += o_val * self.output_weights[NNUE_HIDDEN_SIZE + i] as i32;
         }
 
-        // 整数スケーリング: 重み項 (64 * 64) とバイアス項 (4096) を 16 で割ることで
+        // 整数スケーリング: 重み項 (64 * 512) とバイアス項 (32768) を 128 で割ることで
         // Float 学習側 (score = output * 256.0) と数学的に 1 対 1 で完全一致
-        let raw_residual_cp = output / 16;
+        let raw_residual_cp = output / 128;
         let residual_cp = raw_residual_cp.clamp(-RESIDUAL_BOUND_CP, RESIDUAL_BOUND_CP);
 
         (Self::material_stm(pos) + residual_cp).clamp(-MAX_EVAL_CP, MAX_EVAL_CP)

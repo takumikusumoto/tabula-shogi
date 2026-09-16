@@ -80,6 +80,37 @@ fn test_nnue_quantization() {
         asym_diff < 1.0,
         "Asymmetric Float vs Int discrepancy too large: float={asym_score_float}, int={asym_score_int}, diff={asym_diff}"
     );
+
+    // 微小重みを持つ学習済みモデルでの量子化生存率（ゼロ化死滅防止）および精度検証
+    let mut trained_trainer = NNUETrainer::new();
+    for (i, w) in trained_trainer.output_weights.iter_mut().enumerate() {
+        // 微小な勾配更新後の重み (-0.015 .. +0.015)
+        *w = ((i as f32 * 0.0037) % 0.03) - 0.015;
+    }
+    trained_trainer.output_bias = 0.05;
+
+    let trained_nnue = trained_trainer.quantize();
+
+    // 旧スケール (64.0) では 89% 以上が 0 に丸められていたが、新スケール (512.0) では大部分が非ゼロとして生存
+    let non_zero_count = trained_nnue
+        .output_weights
+        .iter()
+        .filter(|&&w| w != 0)
+        .count();
+    assert!(
+        non_zero_count > 200,
+        "Most output weights must survive quantization with scale 512.0, but got non-zero={non_zero_count}/256"
+    );
+
+    // 微小重みでも Float と Int の評価値の誤差が 2cp 以内に保たれること（整数除算 / 128 による丸め誤差）
+    let trained_score_int = trained_nnue.evaluate(&asym_pos);
+    let (t_res_float, _, _, _, _, _) = trained_trainer.forward(&asym_m_feats, &asym_o_feats);
+    let t_score_float = asym_mat_stm as f32 + t_res_float;
+    let t_diff = (trained_score_int as f32 - t_score_float).abs();
+    assert!(
+        t_diff <= 2.0,
+        "Discrepancy with non-zero weights too large: float={t_score_float}, int={trained_score_int}, diff={t_diff}"
+    );
 }
 
 #[test]
@@ -379,7 +410,7 @@ fn test_nnue_turn_symmetry() {
 fn test_nnue_residual_strictly_bounded() {
     // 極端な重みを持つ評価器を作成して、残差が必ず [-RESIDUAL_BOUND_CP, RESIDUAL_BOUND_CP] にクリップされることを検証
     let mut evaluator = NNUEEvaluator::new();
-    evaluator.output_bias = 1_000_000; // 巨大なバイアス (1_000_000 / 16 = 62_500 > 25_000)
+    evaluator.output_bias = 4_000_000; // 巨大なバイアス (4_000_000 / 128 = 31_250 > 25_000)
 
     let pos = Position::startpos();
     let mat_stm = NNUEEvaluator::material_stm(&pos);
@@ -391,7 +422,7 @@ fn test_nnue_residual_strictly_bounded() {
         "Residual must be clamped to max bound +25000 cp even with huge positive bias"
     );
 
-    evaluator.output_bias = -1_000_000;
+    evaluator.output_bias = -4_000_000;
     let eval_neg = evaluator.evaluate(&pos);
     let residual_neg = eval_neg - mat_stm;
     assert_eq!(
@@ -428,8 +459,8 @@ fn test_see_xray_battery_attack() {
 #[test]
 fn test_nnue_total_score_clamped_strictly_below_mate_zone() {
     let mut evaluator = NNUEEvaluator::new();
-    // 極端な巨大バイアスを与えて残差を +25,000cp に張り付かせる
-    evaluator.output_bias = 1_000_000;
+    // 極端な巨大バイアスを与えて残差を +25,000cp に張り付かせる (4_000_000 / 128 = 31_250 > 25_000)
+    evaluator.output_bias = 4_000_000;
 
     // 先手大駒得局面 (飛車・角・金・銀・桂・香・歩多数を先手の手駒に追加)
     let mut pos = Position::startpos();
@@ -455,7 +486,7 @@ fn test_nnue_total_score_clamped_strictly_below_mate_zone() {
 
     // 後手大差局面
     pos.side_to_move = tabula_shogi::types::Color::White;
-    evaluator.output_bias = -1_000_000;
+    evaluator.output_bias = -4_000_000;
     let eval_white = evaluator.evaluate(&pos);
     assert_eq!(
         eval_white, -MAX_EVAL_CP,

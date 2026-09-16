@@ -46,10 +46,10 @@ impl NNUETrainer {
 
         let mut output_weights = [0.0f32; NNUE_HIDDEN_SIZE * 2];
         for (w, &q) in output_weights.iter_mut().zip(eval.output_weights.iter()) {
-            *w = q as f32 / 64.0;
+            *w = q as f32 / 512.0;
         }
 
-        let output_bias = eval.output_bias as f32 / 4096.0;
+        let output_bias = eval.output_bias as f32 / 32768.0;
 
         NNUETrainer {
             feature_weights,
