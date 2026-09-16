@@ -28,7 +28,7 @@ impl Default for LoopConfig {
             iterations: 3,
             start_iteration: None,
             state_path: "loop_state.txt".to_string(),
-            games_per_iteration: 50,
+            games_per_iteration: 120,
             eval_pairs: 15,
             threads: 2,
             depth: 2,
@@ -139,20 +139,17 @@ impl SelfImprovementLoop {
                 cur_gen, round, config.iterations
             );
 
-            // Step 1: 自己対局データ生成 (Champion 80局 + Candidate 40局 のハイブリッド生成)
-            let champ_games = (config.games_per_iteration * 2) / 3;
-            let cand_games = config.games_per_iteration.saturating_sub(champ_games);
-
+            // Step 1: 全局を王者同士で生成し、未昇格の候補モデルを混入させない。
             println!(
-                "\n--- Step 1: Self-Play Data Generation ({} games: {} Champion + {} Candidate) ---",
-                config.games_per_iteration, champ_games, cand_games
+                "\n--- Step 1: Self-Play Data Generation ({} Champion games) ---",
+                config.games_per_iteration
             );
             let gen_seed = 0x9E3779B97F4A7C15u64
                 .wrapping_add((cur_gen as u64).wrapping_mul(0x517cc1b727220a95));
 
-            // 1-A: 王者 (HCE) による堅牢な定石・指し手データの生成
+            // 王者（初期状態ではHCE）による自己対局データの生成。
             let sp_cfg_champ = SelfPlayConfig {
-                num_games: champ_games,
+                num_games: config.games_per_iteration,
                 threads: config.threads,
                 depth: config.depth,
                 data_output: Some(config.data_path.clone()),
@@ -161,21 +158,6 @@ impl SelfImprovementLoop {
                 ..Default::default()
             };
             SelfPlayManager::run(sp_cfg_champ);
-
-            // 1-B: 候補 NNUE による自己対局 (自身の悪手・弱点局面をデータに供給し自律修復)
-            if cand_games > 0 {
-                let cand_eval = trainer.quantize();
-                let sp_cfg_cand = SelfPlayConfig {
-                    num_games: cand_games,
-                    threads: config.threads,
-                    depth: config.depth,
-                    data_output: Some(config.data_path.clone()),
-                    eval_mode: EvalMode::Nnue(Arc::new(cand_eval)),
-                    seed: gen_seed.wrapping_add(0xbf58476d1ce4e5b9),
-                    ..Default::default()
-                };
-                SelfPlayManager::run(sp_cfg_cand);
-            }
 
             // Step 2: データセット読込 & IIZ 深読み再評価 & 継続 NNUE 学習
             println!("\n--- Step 2: Training Candidate Model from Dataset (IIZ Distillation) ---");
