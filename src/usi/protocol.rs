@@ -1,8 +1,10 @@
 use super::parse::UsiCommand;
 use crate::board::Position;
 use crate::eval::NNUEEvaluator;
+use crate::eval::halfkp::HalfKPEvaluator;
 use crate::search::{SearchEngine, TimeControl};
 use std::io::{self, BufRead};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -27,9 +29,18 @@ pub const DEFAULT_THREADS: usize = 1;
 
 impl UsiHandler {
     pub fn new() -> Self {
+        let initial_eval = if Path::new("models/best_halfkp.bin").exists() {
+            match HalfKPEvaluator::load_from_file("models/best_halfkp.bin") {
+                Ok(hkp) => crate::eval::EvalMode::HalfKP(Arc::new(hkp)),
+                Err(_) => crate::eval::EvalMode::Hce,
+            }
+        } else {
+            crate::eval::EvalMode::Hce
+        };
+
         UsiHandler {
             pos: Position::startpos(),
-            engine: SearchEngine::new(DEFAULT_TT_SIZE_MB),
+            engine: SearchEngine::new(DEFAULT_TT_SIZE_MB).with_eval_mode(initial_eval),
             threads: DEFAULT_THREADS,
             tt_size_mb: DEFAULT_TT_SIZE_MB,
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -61,7 +72,15 @@ impl UsiHandler {
                     "option name Threads type spin default {} min 1 max 64",
                     self.threads
                 );
-                println!("option name Eval_Type type combo default HCE var HCE var NNUE");
+                let default_eval = match &self.engine.eval_mode {
+                    crate::eval::EvalMode::HalfKP(_) => "HalfKP",
+                    crate::eval::EvalMode::Nnue(_) => "NNUE",
+                    crate::eval::EvalMode::Hce => "HCE",
+                };
+                println!(
+                    "option name Eval_Type type combo default {default_eval} var HalfKP var HCE var NNUE"
+                );
+                println!("option name HalfKP_File type string default models/best_halfkp.bin");
                 println!("option name NNUE_File type string default <empty>");
                 println!("usiok");
             }
@@ -80,13 +99,34 @@ impl UsiHandler {
                 {
                     self.threads = t.clamp(1, 64);
                 } else if name.eq_ignore_ascii_case("eval_type") {
-                    if value.eq_ignore_ascii_case("nnue") {
+                    if value.eq_ignore_ascii_case("halfkp") {
+                        let eval = if Path::new("models/best_halfkp.bin").exists() {
+                            match HalfKPEvaluator::load_from_file("models/best_halfkp.bin") {
+                                Ok(h) => Arc::new(h),
+                                Err(_) => Arc::new(HalfKPEvaluator::new()),
+                            }
+                        } else {
+                            Arc::new(HalfKPEvaluator::new())
+                        };
+                        self.engine.eval_mode = crate::eval::EvalMode::HalfKP(eval);
+                        println!("info string Evaluation mode switched to HalfKP");
+                    } else if value.eq_ignore_ascii_case("nnue") {
                         let nnue = NNUEEvaluator::new();
                         self.engine.eval_mode = crate::eval::EvalMode::Nnue(Arc::new(nnue));
                         println!("info string Evaluation mode switched to NNUE (built-in)");
                     } else {
                         self.engine.eval_mode = crate::eval::EvalMode::Hce;
                         println!("info string Evaluation mode switched to HCE");
+                    }
+                } else if name.eq_ignore_ascii_case("halfkp_file") {
+                    match HalfKPEvaluator::load_from_file(&value) {
+                        Ok(hkp) => {
+                            self.engine.eval_mode = crate::eval::EvalMode::HalfKP(Arc::new(hkp));
+                            println!("info string Loaded HalfKP weights from {value}");
+                        }
+                        Err(e) => {
+                            eprintln!("Error loading HalfKP file '{value}': {e}");
+                        }
                     }
                 } else if name.eq_ignore_ascii_case("nnue_file") {
                     match NNUEEvaluator::load_from_file(&value) {

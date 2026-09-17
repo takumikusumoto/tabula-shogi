@@ -381,4 +381,47 @@ mod tests {
             Some(Move::from_usi("7g7f").unwrap())
         );
     }
+
+    #[test]
+    fn test_usi_halfkp_options_and_switching() {
+        use tabula_shogi::UsiHandler;
+        use tabula_shogi::usi::UsiCommand;
+
+        let mut handler = UsiHandler::new();
+        // 初期状態の確認
+        assert!(matches!(
+            handler.eval_mode(),
+            tabula_shogi::eval::EvalMode::Hce | tabula_shogi::eval::EvalMode::HalfKP(_)
+        ));
+
+        // SetOption eval_type HalfKP
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "HalfKP".to_string(),
+        });
+        assert!(matches!(
+            handler.eval_mode(),
+            tabula_shogi::eval::EvalMode::HalfKP(_)
+        ));
+
+        // SetOption eval_type HCE
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "HCE".to_string(),
+        });
+        assert!(matches!(
+            handler.eval_mode(),
+            tabula_shogi::eval::EvalMode::Hce
+        ));
+
+        // SetOption eval_type NNUE
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "NNUE".to_string(),
+        });
+        assert!(matches!(
+            handler.eval_mode(),
+            tabula_shogi::eval::EvalMode::Nnue(_)
+        ));
+    }
 }
