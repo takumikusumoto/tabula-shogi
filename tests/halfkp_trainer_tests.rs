@@ -215,3 +215,22 @@ fn test_halfkp_trainer_checkpoint_roundtrip() {
     assert_eq!(trainer.v_feat[0], loaded.v_feat[0]);
     assert_eq!(trainer.step_feat[0], loaded.step_feat[0]);
 }
+
+#[test]
+fn test_halfkp_trainer_checkpoint_size_validation() {
+    let corrupted_path = "target/test_corrupted_ckpt.bin";
+    std::fs::write(corrupted_path, vec![0u8; 100]).expect("Failed to write dummy corrupted file");
+
+    let result = HalfKPTrainer::load_checkpoint(corrupted_path);
+    let _ = std::fs::remove_file(corrupted_path);
+
+    match result {
+        Err(err_msg) => {
+            assert!(
+                err_msg.contains("file size mismatch"),
+                "Error message should mention size mismatch: {err_msg}"
+            );
+        }
+        Ok(_) => panic!("Corrupted or truncated checkpoint file must return Err, not Ok"),
+    }
+}

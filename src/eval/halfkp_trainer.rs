@@ -540,6 +540,25 @@ impl HalfKPTrainer {
     pub fn load_checkpoint(path: &str) -> Result<Self, String> {
         let file = std::fs::File::open(path)
             .map_err(|e| format!("Failed to open HalfKP checkpoint '{path}': {e}"))?;
+
+        // チェックポイントファイルサイズの事前検証 (破損・切り詰めの早期検出)
+        let expected_len: u64 = 8  // magic "TB_HKPCK"
+            + 5 * 4  // beta1_pow, beta2_pow, output_bias, m_bias, v_bias
+            + 3 * (HALFKP_HIDDEN_SIZE as u64) * 4  // feature_biases, m_f_bias, v_f_bias
+            + 3 * (HALFKP_HIDDEN_SIZE as u64 * 2) * 4  // output_weights, m_out, v_out
+            + 3 * (HALFKP_INPUT_SIZE as u64) * (HALFKP_HIDDEN_SIZE as u64) * 4  // feature_weights, m_feat, v_feat
+            + (HALFKP_INPUT_SIZE as u64) * 4; // step_feat
+        let file_len = file
+            .metadata()
+            .map_err(|e| format!("Failed to read checkpoint file metadata: {e}"))?
+            .len();
+        if file_len != expected_len {
+            return Err(format!(
+                "HalfKP checkpoint file size mismatch: got {} bytes, expected {} bytes",
+                file_len, expected_len
+            ));
+        }
+
         let mut reader = io::BufReader::new(file);
 
         let mut magic = [0u8; 8];
