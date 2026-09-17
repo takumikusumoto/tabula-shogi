@@ -91,6 +91,10 @@ impl SelfImprovementLoop {
 
         let mut trainer = match &current_best_eval {
             EvalMode::Nnue(best_nnue) => NNUETrainer::from_evaluator(best_nnue),
+            EvalMode::HalfKP(_) => {
+                // HalfKP Trainer は Step 3 で統合
+                NNUETrainer::new()
+            }
             EvalMode::Hce => {
                 if Path::new(&config.candidate_model_path).exists() {
                     match NNUEEvaluator::load_from_file(&config.candidate_model_path) {

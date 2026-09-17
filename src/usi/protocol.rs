@@ -178,6 +178,12 @@ impl UsiHandler {
                     println!("info string total:          {:+6} cp", score);
                     println!("eval {}", score);
                 }
+                crate::eval::EvalMode::HalfKP(halfkp) => {
+                    let score = halfkp.evaluate(&self.pos);
+                    println!("info string --- HalfKP Evaluation ---");
+                    println!("info string total:          {:+6} cp", score);
+                    println!("eval {}", score);
+                }
             },
             UsiCommand::Unknown(_) => {}
         }
