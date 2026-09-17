@@ -50,6 +50,16 @@ pub struct HalfKPTrainer {
     pub beta2_pow: f32,
 }
 
+/// AdamW 最適化ハイパーパラメータ
+#[derive(Clone, Copy, Debug)]
+pub struct AdamWHyperParams {
+    pub lr: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+    pub wd: f32,
+}
+
 impl Default for HalfKPTrainer {
     fn default() -> Self {
         Self::new()
@@ -58,25 +68,20 @@ impl Default for HalfKPTrainer {
 
 impl HalfKPTrainer {
     #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
     fn adamw_step(
         w: &mut f32,
         m: &mut f32,
         v: &mut f32,
         g: f32,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
         one_minus_b1: f32,
         one_minus_b2: f32,
-        eps: f32,
-        wd: f32,
+        hp: &AdamWHyperParams,
     ) {
-        *m = beta1 * *m + (1.0 - beta1) * g;
-        *v = beta2 * *v + (1.0 - beta2) * g * g;
+        *m = hp.beta1 * *m + (1.0 - hp.beta1) * g;
+        *v = hp.beta2 * *v + (1.0 - hp.beta2) * g * g;
         let m_hat = *m / one_minus_b1;
         let v_hat = *v / one_minus_b2;
-        *w -= lr * (m_hat / (v_hat.sqrt() + eps) + wd * *w);
+        *w -= hp.lr * (m_hat / (v_hat.sqrt() + hp.eps) + hp.wd * *w);
     }
 
     /// 新規初期化 (Evaluator の初期重みから構築)
@@ -387,19 +392,23 @@ impl HalfKPTrainer {
         let one_minus_beta1 = 1.0 - self.beta1_pow;
         let one_minus_beta2 = 1.0 - self.beta2_pow;
 
+        let hp = AdamWHyperParams {
+            lr,
+            beta1,
+            beta2,
+            eps: epsilon,
+            wd: weight_decay,
+        };
+
         // 1. 出力層バイアス更新
         Self::adamw_step(
             &mut self.output_bias,
             &mut self.m_bias,
             &mut self.v_bias,
             grad_out_b,
-            lr,
-            beta1,
-            beta2,
             one_minus_beta1,
             one_minus_beta2,
-            epsilon,
-            weight_decay,
+            &hp,
         );
 
         // 2. 出力層重み更新
@@ -409,13 +418,9 @@ impl HalfKPTrainer {
                 &mut self.m_out[i],
                 &mut self.v_out[i],
                 g,
-                lr,
-                beta1,
-                beta2,
                 one_minus_beta1,
                 one_minus_beta2,
-                epsilon,
-                weight_decay,
+                &hp,
             );
         }
 
@@ -426,13 +431,9 @@ impl HalfKPTrainer {
                 &mut self.m_f_bias[i],
                 &mut self.v_f_bias[i],
                 g,
-                lr,
-                beta1,
-                beta2,
                 one_minus_beta1,
                 one_minus_beta2,
-                epsilon,
-                weight_decay,
+                &hp,
             );
         }
 
@@ -461,13 +462,9 @@ impl HalfKPTrainer {
                     &mut m_slice[i],
                     &mut v_slice[i],
                     g,
-                    lr,
-                    beta1,
-                    beta2,
                     one_minus_b1_f,
                     one_minus_b2_f,
-                    epsilon,
-                    weight_decay,
+                    &hp,
                 );
             }
         }
