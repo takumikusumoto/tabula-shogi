@@ -90,6 +90,11 @@ fn test_autonomous_loop_single_iteration() {
         .to_str()
         .unwrap()
         .to_string();
+    let cand_ckpt_path = temp_dir
+        .join("test_loop_cand_ckpt.bin")
+        .to_str()
+        .unwrap()
+        .to_string();
 
     let state_path = temp_dir
         .join("test_loop_state.txt")
@@ -106,6 +111,7 @@ fn test_autonomous_loop_single_iteration() {
     let _ = fs::remove_file(&deep_data_path);
     let _ = fs::remove_file(&best_path);
     let _ = fs::remove_file(&cand_path);
+    let _ = fs::remove_file(&cand_ckpt_path);
     let _ = fs::remove_file(&state_path);
 
     let config = LoopConfig {
@@ -123,6 +129,8 @@ fn test_autonomous_loop_single_iteration() {
         deep_data_path: deep_data_path.clone(),
         best_model_path: best_path.clone(),
         candidate_model_path: cand_path.clone(),
+        candidate_ckpt_path: cand_ckpt_path.clone(),
+        min_promotion_games: 20,
     };
 
     SelfImprovementLoop::run(&config);
@@ -136,10 +144,15 @@ fn test_autonomous_loop_single_iteration() {
         fs::metadata(&cand_path).is_ok(),
         "Candidate model should be saved"
     );
+    assert!(
+        fs::metadata(&cand_ckpt_path).is_ok(),
+        "Candidate checkpoint should be saved"
+    );
 
     let _ = fs::remove_file(&data_path);
     let _ = fs::remove_file(&deep_data_path);
     let _ = fs::remove_file(&best_path);
     let _ = fs::remove_file(&cand_path);
+    let _ = fs::remove_file(&cand_ckpt_path);
     let _ = fs::remove_file(&state_path);
 }

@@ -369,6 +369,12 @@ fn run_loop(args: &[String]) {
                     i += 1;
                 }
             }
+            "--batch-size" | "-b" => {
+                if i + 1 < args.len() {
+                    config.batch_size = args[i + 1].parse().unwrap_or(config.batch_size);
+                    i += 1;
+                }
+            }
             "--data" => {
                 if i + 1 < args.len() {
                     config.data_path = args[i + 1].clone();
@@ -378,6 +384,25 @@ fn run_loop(args: &[String]) {
             "--best" => {
                 if i + 1 < args.len() {
                     config.best_model_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--candidate" => {
+                if i + 1 < args.len() {
+                    config.candidate_model_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--candidate-ckpt" => {
+                if i + 1 < args.len() {
+                    config.candidate_ckpt_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--min-games" => {
+                if i + 1 < args.len() {
+                    config.min_promotion_games =
+                        args[i + 1].parse().unwrap_or(config.min_promotion_games);
                     i += 1;
                 }
             }
@@ -400,14 +425,14 @@ fn run_loop(args: &[String]) {
                 }
             }
             "--help" | "-h" => {
-                println!("TabulaShogi Autonomous Self-Improvement Loop");
+                println!("TabulaShogi Autonomous Self-Improvement Loop (HalfKP)");
                 println!("USAGE:\n    tabula-shogi loop [OPTIONS]");
                 println!("OPTIONS:");
                 println!(
                     "    -i, --iterations <N>    Number of improvement generations [default: 3]"
                 );
                 println!(
-                    "    -g, --games <N>         Self-play games per generation [default: 50]"
+                    "    -g, --games <N>         Self-play games per generation [default: 120]"
                 );
                 println!(
                     "    -p, --eval-pairs <N>    Evaluation game pairs per generation [default: 15]"
@@ -415,14 +440,24 @@ fn run_loop(args: &[String]) {
                 println!("    -t, --threads <T>       Worker threads [default: 2]");
                 println!("    -d, --depth <D>         Search depth [default: 2]");
                 println!(
-                    "    -e, --epochs <E>        NNUE training epochs per generation [default: 3]"
+                    "    -e, --epochs <E>        HalfKP training epochs per generation [default: 3]"
                 );
                 println!("        --lr <FLOAT>        Learning rate [default: 0.001]");
+                println!("    -b, --batch-size <N>    Mini-batch size [default: 1024]");
                 println!(
                     "        --data <PATH>       Path to cumulative training dataset [default: loop_dataset.tsv]"
                 );
                 println!(
-                    "        --best <PATH>       Path to best model binary [default: best_nnue.bin]"
+                    "        --best <PATH>       Path to best model binary [default: models/best_halfkp.bin]"
+                );
+                println!(
+                    "        --candidate <PATH>  Path to candidate model binary [default: models/candidate_halfkp.bin]"
+                );
+                println!(
+                    "        --candidate-ckpt <PATH> Path to candidate checkpoint [default: models/candidate_halfkp_ckpt.bin]"
+                );
+                println!(
+                    "        --min-games <N>     Minimum evaluation games for promotion [default: 20]"
                 );
                 return;
             }
