@@ -1,6 +1,7 @@
 pub mod dfpn;
 pub mod engine;
 pub mod ordering;
+pub mod qsearch;
 pub mod see;
 pub mod time_mgr;
 pub mod tt;

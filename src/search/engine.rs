@@ -12,7 +12,7 @@ pub(crate) const INF: i32 = 30_000;
 pub(crate) const MATE_SCORE: i32 = 28_000;
 
 // --- 探索パラメータ定数 ---
-const TIME_CHECK_INTERVAL: u64 = 1024;
+pub(crate) const TIME_CHECK_INTERVAL: u64 = 1024;
 const ASPIRATION_DELTA: i32 = 35;
 const REVERSE_FUTILITY_MARGIN: i32 = 120; // depth あたり
 const FUTILITY_MARGIN: i32 = 180;
@@ -1083,121 +1083,17 @@ impl SearchEngine {
         best_score
     }
 
-    /// 静止探索 (Quiescence Search) + SEE Pruning
+    /// 静止探索 (Quiescence Search) + SEE Pruning (qsearch モジュールに委譲)
+    #[inline]
     fn quiescence(
         &mut self,
         pos: &mut Position,
-        mut alpha: i32,
+        alpha: i32,
         beta: i32,
         ply: usize,
         ctx: &SearchContext,
     ) -> i32 {
-        self.nodes += 1;
-        if let Some(max_n) = self.max_nodes
-            && self.nodes >= max_n
-        {
-            ctx.stop_flag.store(true, Ordering::Relaxed);
-            return self.evaluate_at_ply(pos, ply);
-        }
-        if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
-            ctx.stop_flag.store(true, Ordering::Relaxed);
-        }
-        if ctx.stop_flag.load(Ordering::Relaxed) {
-            return 0;
-        }
-
-        if ply >= 64 {
-            return self.evaluate_at_ply(pos, ply);
-        }
-
-        let in_check = pos.is_in_check(pos.side_to_move);
-
-        if in_check {
-            // 王手中の処理: stand-pat 禁止、全王手回避手を探索
-            let mut evasions = MoveGenerator::generate_evasions(pos);
-            if evasions.is_empty() {
-                // 回避手なし = 詰み
-                return -MATE_SCORE + (ply as i32);
-            }
-
-            MoveOrderer::order_moves(
-                &mut evasions,
-                pos,
-                None,
-                &[None, None],
-                None,
-                Some(&self.history),
-            );
-
-            for mv in evasions {
-                pos.do_move(mv);
-                self.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
-                let score = -self.quiescence(pos, -beta, -alpha, ply + 1, ctx);
-                pos.undo_move();
-
-                if ctx.stop_flag.load(Ordering::Relaxed) {
-                    return 0;
-                }
-
-                if score >= beta {
-                    return beta;
-                }
-                if score > alpha {
-                    alpha = score;
-                }
-            }
-            return alpha;
-        }
-
-        // 王手されていない通常局面: 静的評価（立合いスコア）
-        let stand_pat = self.evaluate_at_ply(pos, ply);
-        if stand_pat >= beta {
-            return beta;
-        }
-        if stand_pat > alpha {
-            alpha = stand_pat;
-        }
-
-        // 取り合い（捕獲手および成り手）のみを生成
-        let all_moves = MoveGenerator::generate_legal_moves(pos);
-        let mut tactical_moves: Vec<Move> = all_moves
-            .into_iter()
-            .filter(|m| pos.board[m.to().index()].is_some() || m.is_promote())
-            .collect();
-
-        MoveOrderer::order_moves(
-            &mut tactical_moves,
-            pos,
-            None,
-            &[None, None],
-            None,
-            Some(&self.history),
-        );
-
-        for mv in tactical_moves {
-            // SEE Pruning: 駒取り手でSEE < 0（損な取り合い）はスキップ
-            if pos.board[mv.to().index()].is_some() && super::see::SEE::evaluate(pos, mv) < 0 {
-                continue;
-            }
-
-            pos.do_move(mv);
-            self.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
-            let score = -self.quiescence(pos, -beta, -alpha, ply + 1, ctx);
-            pos.undo_move();
-
-            if ctx.stop_flag.load(Ordering::Relaxed) {
-                return 0;
-            }
-
-            if score >= beta {
-                return beta;
-            }
-            if score > alpha {
-                alpha = score;
-            }
-        }
-
-        alpha
+        super::qsearch::quiescence(self, pos, alpha, beta, ply, ctx)
     }
 
     /// 置換表を辿ってPV（読み筋）を取り出す
