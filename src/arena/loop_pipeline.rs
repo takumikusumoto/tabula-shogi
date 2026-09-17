@@ -351,7 +351,50 @@ impl SelfImprovementLoop {
         println!(
             "\n--- Step 2: Training Candidate Model from Dataset (IIZ Distillation + HalfKP AdamW) ---"
         );
-        let mut dataset = match DatasetHandler::load_sampled_with_deep_pool(
+        // 1. やねうら王流 IIZ (多重反復雑巾絞り):
+        // 直近の自己対局データ (data_path) から最新局面を抽出し、
+        // 探索深さ Depth+2 で深読み再評価を行う (深読みプール既存局面との重複再処理を完全防止)
+        let mut successful_relabelled_count = 0;
+        if Path::new(&paths.data_path).exists()
+            && let Ok(mut recent_entries) = DatasetHandler::load_sampled(
+                &paths.data_path,
+                MAX_IIZ_RELABEL_PER_GEN,
+                1.0,
+                gen_seed,
+            )
+            && !recent_entries.is_empty()
+        {
+            let relabel_count = recent_entries.len();
+            let relabel_depth = arena.depth.saturating_add(2);
+            let t_relabel = std::time::Instant::now();
+            let successful_relabelled = DatasetHandler::relabel_deep(
+                &mut recent_entries,
+                relabel_count,
+                relabel_depth,
+                arena.threads,
+                current_best_eval,
+            );
+            println!(
+                "IIZ Distillation: Successfully re-evaluated {}/{} recent positions at Depth {} in {:.2}s",
+                successful_relabelled.len(),
+                relabel_count,
+                relabel_depth,
+                t_relabel.elapsed().as_secs_f64()
+            );
+
+            // 探索が正常完了した真の深読み教師局面のみを永続プールファイルに追記
+            if !successful_relabelled.is_empty() {
+                if let Err(e) =
+                    DatasetHandler::append_to_file(&paths.deep_data_path, &successful_relabelled)
+                {
+                    eprintln!("Warning: Failed to persist deep relabeled pool: {e}");
+                }
+                successful_relabelled_count = successful_relabelled.len();
+            }
+        }
+
+        // 2. 蓄積された深読み高品質プール (50%) と通常自己対局データ (50%) をブレンドして学習用データセットを構築
+        let dataset = match DatasetHandler::load_sampled_with_deep_pool(
             &paths.data_path,
             Some(&paths.deep_data_path),
             MAX_DATASET_SAMPLE_LIMIT,
@@ -363,35 +406,7 @@ impl SelfImprovementLoop {
             _ => return None,
         };
 
-        // やねうら王流 IIZ (多重反復雑巾絞り): 最新サンプリング局面を Depth+2 で深読み再評価
-        let relabel_count = MAX_IIZ_RELABEL_PER_GEN.min(dataset.len());
-        let relabel_depth = arena.depth.saturating_add(2);
-        let t_relabel = std::time::Instant::now();
-        let successful_relabelled = DatasetHandler::relabel_deep(
-            &mut dataset,
-            relabel_count,
-            relabel_depth,
-            arena.threads,
-            current_best_eval,
-        );
-        println!(
-            "IIZ Distillation: Successfully re-evaluated {}/{} positions at Depth {} in {:.2}s",
-            successful_relabelled.len(),
-            relabel_count,
-            relabel_depth,
-            t_relabel.elapsed().as_secs_f64()
-        );
-
-        // 探索が正常完了した真の深読み教師局面のみを永続プールファイルに追記
-        if !successful_relabelled.is_empty()
-            && let Err(e) =
-                DatasetHandler::append_to_file(&paths.deep_data_path, &successful_relabelled)
-        {
-            eprintln!("Warning: Failed to persist deep relabeled pool: {e}");
-        }
-
-        let relabelled_count = successful_relabelled.len();
-        Some((dataset, relabelled_count))
+        Some((dataset, successful_relabelled_count))
     }
 
     /// Step 3: Candidate 学習 & メモリ即時解放

@@ -38,12 +38,21 @@ impl SEE {
         let mut gain = [0i32; MAX_SEE_DEPTH];
         let mut d = 0;
 
-        // 0段階目で得る駒
-        gain[0] = target_piece.piece_type.base_value();
+        // 0段階目で得る駒 (取り成りの場合は成りの価値も加算)
+        gain[0] = target_piece.piece_type.base_value()
+            + if mv.is_promote() {
+                PROMOTION_SEE_VALUE
+            } else {
+                0
+            };
 
         // 仮想的な盤面で攻撃駒を順番に辿る
         let mut attackers = Self::get_attackers_to(pos, to_sq);
-        let mut current_pt = moved_piece_type;
+        let mut current_pt = if mv.is_promote() {
+            moved_piece_type.promote().unwrap_or(moved_piece_type)
+        } else {
+            moved_piece_type
+        };
         let mut side = pos.side_to_move.opposite();
 
         // 最初の手の攻撃駒を除去し、背後のX-ray利きを追加

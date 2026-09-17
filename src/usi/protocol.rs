@@ -16,6 +16,8 @@ pub struct UsiHandler {
     tt_size_mb: usize,
     stop_flag: Arc<AtomicBool>,
     search_handle: Option<thread::JoinHandle<()>>,
+    halfkp_path: String,
+    nnue_path: String,
 }
 
 impl Default for UsiHandler {
@@ -29,8 +31,10 @@ pub const DEFAULT_THREADS: usize = 1;
 
 impl UsiHandler {
     pub fn new() -> Self {
-        let initial_eval = if Path::new("models/best_halfkp.bin").exists() {
-            match HalfKPEvaluator::load_from_file("models/best_halfkp.bin") {
+        let halfkp_path = "models/best_halfkp.bin".to_string();
+        let nnue_path = "models/nnue.bin".to_string();
+        let initial_eval = if Path::new(&halfkp_path).exists() {
+            match HalfKPEvaluator::load_from_file(&halfkp_path) {
                 Ok(hkp) => crate::eval::EvalMode::HalfKP(Arc::new(hkp)),
                 Err(_) => crate::eval::EvalMode::Hce,
             }
@@ -45,6 +49,8 @@ impl UsiHandler {
             tt_size_mb: DEFAULT_TT_SIZE_MB,
             stop_flag: Arc::new(AtomicBool::new(false)),
             search_handle: None,
+            halfkp_path,
+            nnue_path,
         }
     }
 
@@ -100,8 +106,8 @@ impl UsiHandler {
                     self.threads = t.clamp(1, 64);
                 } else if name.eq_ignore_ascii_case("eval_type") {
                     if value.eq_ignore_ascii_case("halfkp") {
-                        let eval = if Path::new("models/best_halfkp.bin").exists() {
-                            match HalfKPEvaluator::load_from_file("models/best_halfkp.bin") {
+                        let eval = if Path::new(&self.halfkp_path).exists() {
+                            match HalfKPEvaluator::load_from_file(&self.halfkp_path) {
                                 Ok(h) => Arc::new(h),
                                 Err(_) => Arc::new(HalfKPEvaluator::new()),
                             }
@@ -109,16 +115,30 @@ impl UsiHandler {
                             Arc::new(HalfKPEvaluator::new())
                         };
                         self.engine.eval_mode = crate::eval::EvalMode::HalfKP(eval);
-                        println!("info string Evaluation mode switched to HalfKP");
+                        println!(
+                            "info string Evaluation mode switched to HalfKP ({})",
+                            self.halfkp_path
+                        );
                     } else if value.eq_ignore_ascii_case("nnue") {
-                        let nnue = NNUEEvaluator::new();
-                        self.engine.eval_mode = crate::eval::EvalMode::Nnue(Arc::new(nnue));
-                        println!("info string Evaluation mode switched to NNUE (built-in)");
+                        let eval = if Path::new(&self.nnue_path).exists() {
+                            match NNUEEvaluator::load_from_file(&self.nnue_path) {
+                                Ok(n) => Arc::new(n),
+                                Err(_) => Arc::new(NNUEEvaluator::new()),
+                            }
+                        } else {
+                            Arc::new(NNUEEvaluator::new())
+                        };
+                        self.engine.eval_mode = crate::eval::EvalMode::Nnue(eval);
+                        println!(
+                            "info string Evaluation mode switched to NNUE ({})",
+                            self.nnue_path
+                        );
                     } else {
                         self.engine.eval_mode = crate::eval::EvalMode::Hce;
                         println!("info string Evaluation mode switched to HCE");
                     }
                 } else if name.eq_ignore_ascii_case("halfkp_file") {
+                    self.halfkp_path = value.clone();
                     match HalfKPEvaluator::load_from_file(&value) {
                         Ok(hkp) => {
                             self.engine.eval_mode = crate::eval::EvalMode::HalfKP(Arc::new(hkp));
@@ -129,6 +149,7 @@ impl UsiHandler {
                         }
                     }
                 } else if name.eq_ignore_ascii_case("nnue_file") {
+                    self.nnue_path = value.clone();
                     match NNUEEvaluator::load_from_file(&value) {
                         Ok(nnue) => {
                             self.engine.eval_mode = crate::eval::EvalMode::Nnue(Arc::new(nnue));

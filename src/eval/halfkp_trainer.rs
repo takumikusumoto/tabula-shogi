@@ -544,11 +544,14 @@ impl HalfKPTrainer {
         // (バックアップ作成に失敗した場合はエラーを返して既存ファイルを保護)
         if std::path::Path::new(path).exists() {
             std::fs::copy(path, &bak_path)?;
-            let _ = std::fs::remove_file(path);
         }
 
-        // 一時ファイルを本番パスへアトミックリネーム
-        std::fs::rename(&tmp_path, path)?;
+        // 一時ファイルを本番パスへアトミックリネーム (Windows では MoveFileExW によりアトミック置換)
+        if let Err(_e) = std::fs::rename(&tmp_path, path) {
+            // 万が一プラットフォーム起因で置換失敗した場合のみ削除して再試行
+            let _ = std::fs::remove_file(path);
+            std::fs::rename(&tmp_path, path)?;
+        }
 
         Ok(())
     }

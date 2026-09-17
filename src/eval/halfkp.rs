@@ -93,7 +93,7 @@ impl HalfKPEvaluator {
         }
     }
 
-    /// 浮動小数点重みから量子化モデルを構築
+    /// 浮動小数点重みから量子化モデルを構築 (HalfKPTrainer::to_evaluator と完全一致)
     pub fn from_float_weights(
         feature_weights: &[[f32; HALFKP_HIDDEN_SIZE]],
         feature_biases: &[f32; HALFKP_HIDDEN_SIZE],
@@ -104,22 +104,22 @@ impl HalfKPEvaluator {
         for row in feature_weights {
             let mut q_row = [0i16; HALFKP_HIDDEN_SIZE];
             for (w, &f) in q_row.iter_mut().zip(row.iter()) {
-                *w = (f * 64.0).clamp(-127.0, 127.0).round() as i16;
+                *w = f.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
             }
             quantized_feats.push(q_row);
         }
 
         let mut quantized_biases = [0i16; HALFKP_HIDDEN_SIZE];
         for (b, &f) in quantized_biases.iter_mut().zip(feature_biases.iter()) {
-            *b = (f * 64.0).clamp(-127.0, 127.0).round() as i16;
+            *b = f.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
 
         let mut quantized_out = [0i16; HALFKP_HIDDEN_SIZE * 2];
         for (w, &f) in quantized_out.iter_mut().zip(output_weights.iter()) {
-            *w = (f * 512.0).clamp(-32767.0, 32767.0).round() as i16;
+            *w = f.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
 
-        let quantized_out_bias = (output_bias * 32768.0).round() as i32;
+        let quantized_out_bias = output_bias.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
 
         HalfKPEvaluator {
             feature_weights: quantized_feats,
@@ -527,11 +527,17 @@ impl HalfKPEvaluator {
         writer.flush()?;
         drop(writer);
 
-        // アトミックリネームによる置換 (Windows では既存ファイルがあるとエラーになる場合があるため事前に置換)
+        let bak_path = format!("{path}.bak");
         if std::path::Path::new(path).exists() {
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::copy(path, &bak_path);
         }
-        std::fs::rename(&tmp_path, path)?;
+
+        // 一時ファイルを本番パスへアトミックリネーム (Windows では MoveFileExW によりアトミック置換)
+        if let Err(_e) = std::fs::rename(&tmp_path, path) {
+            // 万が一プラットフォーム起因で置換失敗した場合のみ削除して再試行
+            let _ = std::fs::remove_file(path);
+            std::fs::rename(&tmp_path, path)?;
+        }
 
         Ok(())
     }

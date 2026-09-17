@@ -157,6 +157,8 @@ impl MatchRunner {
                         let initial_pos = Self::generate_opening_position(config.random_opening, seed);
 
                         // Game 1: Black = A, White = B
+                        engine_a.clear();
+                        engine_b.clear();
                         let mut pos1 = initial_pos.clone();
                         let res1 = Self::play_game(
                             &mut engine_a,
@@ -173,6 +175,8 @@ impl MatchRunner {
                         };
 
                         // Game 2: Black = B, White = A (先後入替)
+                        engine_a.clear();
+                        engine_b.clear();
                         let mut pos2 = initial_pos;
                         let res2 = Self::play_game(
                             &mut engine_b,

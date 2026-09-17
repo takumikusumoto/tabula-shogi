@@ -747,6 +747,8 @@ impl SearchEngine {
                 Some(&self.history),
             );
 
+            let mut alpha = -INF;
+            let beta = INF;
             let mut best_score = -INF;
             let mut best_move = None;
 
@@ -757,12 +759,15 @@ impl SearchEngine {
 
                 pos.do_move(mv);
                 self.update_accumulator_after_move_at_ply(pos, mv, 1);
-                let score = -self.negamax(pos, depth - 1, -INF, INF, 1, true, &ctx);
+                let score = -self.negamax(pos, depth - 1, -beta, -alpha, 1, true, &ctx);
                 pos.undo_move();
 
                 if score > best_score {
                     best_score = score;
                     best_move = Some(mv);
+                }
+                if score > alpha {
+                    alpha = score;
                 }
             }
 

@@ -462,4 +462,78 @@ mod tests {
         // 4. 正常終了コマンドの送信
         assert!(!handler.process_command(UsiCommand::Quit));
     }
+
+    #[test]
+    fn test_see_capture_promotion_value() {
+        use tabula_shogi::search::see::{PROMOTION_SEE_VALUE, SEE};
+        // 5四の歩が 5三の金(成る位置) を取る手
+        // SFEN: k8/9/4g4/4P4/9/9/9/9/8K b - 1
+        let sfen = "k8/9/4g4/4P4/9/9/9/9/8K b - 1";
+        let pos = Position::from_sfen(sfen).expect("Valid test SFEN");
+
+        let mv_promote = Move::from_usi("5d5c+").expect("Valid move 5d5c+");
+        let mv_unpromote = Move::from_usi("5d5c").expect("Valid move 5d5c");
+
+        let val_promote = SEE::evaluate(&pos, mv_promote);
+        let val_unpromote = SEE::evaluate(&pos, mv_unpromote);
+
+        assert_eq!(
+            val_promote - val_unpromote,
+            PROMOTION_SEE_VALUE,
+            "Capture with promotion must include PROMOTION_SEE_VALUE in SEE evaluation"
+        );
+        assert!(val_promote > 0);
+    }
+
+    #[test]
+    fn test_usi_eval_type_respects_custom_halfkp_file() {
+        use tabula_shogi::eval::HalfKPEvaluator;
+        use tabula_shogi::usi::UsiCommand;
+        use tabula_shogi::usi::protocol::UsiHandler;
+
+        let temp_dir = std::env::temp_dir();
+        let custom_model_path = temp_dir
+            .join(format!("test_custom_halfkp_{}.bin", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+
+        let mut custom_eval = HalfKPEvaluator::new();
+        custom_eval.output_bias = 777;
+        custom_eval
+            .save_to_file(&custom_model_path)
+            .expect("Save custom model");
+
+        let mut handler = UsiHandler::new();
+
+        // 1. halfkp_file オプションでカスタムパスを設定
+        handler.process_command(UsiCommand::SetOption {
+            name: "halfkp_file".to_string(),
+            value: custom_model_path.clone(),
+        });
+
+        // 2. 一度 HCE に切り替え
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "HCE".to_string(),
+        });
+
+        // 3. 再度 eval_type: halfkp に切り替え (ここで custom_model_path が使われるべき)
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "halfkp".to_string(),
+        });
+
+        // 4. 正しくカスタムモデルがロードされているか検証
+        if let tabula_shogi::eval::EvalMode::HalfKP(loaded_eval) = handler.eval_mode() {
+            assert_eq!(
+                loaded_eval.output_bias, 777,
+                "Should load custom model weights"
+            );
+        } else {
+            panic!("EvalMode should be HalfKP");
+        }
+
+        let _ = std::fs::remove_file(&custom_model_path);
+        let _ = std::fs::remove_file(format!("{custom_model_path}.bak"));
+    }
 }
