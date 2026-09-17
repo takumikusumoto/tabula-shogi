@@ -9,6 +9,17 @@ use crate::selfplay::{SelfPlayConfig, SelfPlayManager};
 use std::path::Path;
 use std::sync::Arc;
 
+/// やねうら王流 IIZ (多重反復雑巾絞り) で 1 世代あたり深読み再評価する最大局面数
+pub const MAX_IIZ_RELABEL_PER_GEN: usize = 5_000;
+/// データセットサンプリング時の最大局面数上限
+pub const MAX_DATASET_SAMPLE_LIMIT: usize = 100_000;
+/// 教師ターゲット作成時の深読み評価値の重み (80%)
+pub const DISTILLATION_TEACHER_WEIGHT: f32 = 0.8;
+/// 教師ターゲット作成時のゲーム勝敗結果の重み (20%)
+pub const DISTILLATION_RESULT_WEIGHT: f32 = 0.2;
+/// シグモイド勝率変換のデフォルト感度係数 (600 cp で勝率 ~73%)
+pub const DEFAULT_SIGMOID_K: f32 = 600.0;
+
 pub struct LoopConfig {
     pub iterations: usize,
     pub start_iteration: Option<usize>,
@@ -276,7 +287,7 @@ impl SelfImprovementLoop {
         let mut dataset = match DatasetHandler::load_sampled_with_deep_pool(
             &config.data_path,
             Some(&config.deep_data_path),
-            100_000,
+            MAX_DATASET_SAMPLE_LIMIT,
             0.5,
             0.5,
             gen_seed,
@@ -285,8 +296,8 @@ impl SelfImprovementLoop {
             _ => return None,
         };
 
-        // やねうら王流 IIZ (多重反復雑巾絞り): 最新サンプリングのうち最大 5,000 局面を Depth+2 で深読み再評価
-        let relabel_count = 5_000.min(dataset.len());
+        // やねうら王流 IIZ (多重反復雑巾絞り): 最新サンプリング局面を Depth+2 で深読み再評価
+        let relabel_count = MAX_IIZ_RELABEL_PER_GEN.min(dataset.len());
         let relabel_depth = config.depth.saturating_add(2);
         let t_relabel = std::time::Instant::now();
         let successful_relabelled = DatasetHandler::relabel_deep(
@@ -367,7 +378,7 @@ impl SelfImprovementLoop {
         let mut init_loss = TrainStepLoss::zero();
         let mut final_loss = TrainStepLoss::zero();
         let mut is_first_batch = true;
-        let k_scale = 600.0f32;
+        let k_scale = DEFAULT_SIGMOID_K;
 
         if let Some(parent) = Path::new(&config.candidate_model_path).parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -410,7 +421,9 @@ impl SelfImprovementLoop {
                         );
                         // 教師ターゲット: 深読み評価値と勝敗結果のハイブリッド蒸留
                         let pred_eval = HalfKPTrainer::sigmoid(entry.score as f32, k_scale);
-                        let target = (0.8 * pred_eval + 0.2 * entry.result).clamp(0.0, 1.0);
+                        let target = (DISTILLATION_TEACHER_WEIGHT * pred_eval
+                            + DISTILLATION_RESULT_WEIGHT * entry.result)
+                            .clamp(0.0, 1.0);
                         batch_samples.push((mover_feats, opp_feats, target));
                     }
                 }

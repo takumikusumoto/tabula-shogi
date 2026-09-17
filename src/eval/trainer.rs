@@ -137,7 +137,7 @@ impl NNUETrainer {
     /// シグモイド勝率予測
     #[inline(always)]
     pub fn sigmoid(score: f32, k: f32) -> f32 {
-        1.0 / (1.0 + 10.0f32.powf(-score / k))
+        super::sigmoid_win_rate(score, k)
     }
 
     /// 単一バッチのフォワード・バックワード・AdamW更新

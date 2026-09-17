@@ -41,3 +41,9 @@ impl EvalMode {
         }
     }
 }
+
+/// 評価値 (centipawns) を勝率 [0.0, 1.0] に変換するシグモイド関数 (Elo 式: 1 / (1 + 10^(-score/k)))
+#[inline(always)]
+pub fn sigmoid_win_rate(score: f32, k: f32) -> f32 {
+    1.0 / (1.0 + 10.0f32.powf(-score / k))
+}
