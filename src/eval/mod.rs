@@ -1,5 +1,6 @@
 pub mod evaluator;
 pub mod halfkp;
+pub mod halfkp_stream_trainer;
 pub mod halfkp_trainer;
 pub mod nnue;
 pub mod trainer;
@@ -9,6 +10,7 @@ pub use halfkp::{
     HALFKP_HIDDEN_SIZE, HALFKP_INPUT_SIZE, HALFKP_MAGIC, HALFKP_PIECE_SIZE, HalfKPAccumulator,
     HalfKPEvaluator,
 };
+pub use halfkp_stream_trainer::{HalfKPStreamTrainer, StreamTrainConfig, StreamTrainSummary};
 pub use halfkp_trainer::HalfKPTrainer;
 pub use nnue::{MAX_EVAL_CP, NNUEEvaluator, RESIDUAL_BOUND_CP};
 pub use trainer::NNUETrainer;

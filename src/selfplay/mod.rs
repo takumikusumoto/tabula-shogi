@@ -3,12 +3,17 @@ pub mod csa;
 pub mod dataset;
 pub mod game;
 pub mod manager;
+pub mod partition;
 
 pub use config::SelfPlayConfig;
 pub use csa::CsaSerializer;
 pub use dataset::{DatasetEntry, DatasetHandler, StreamingBatchReader};
 pub use game::{GameRecord, GameResult, GameRunner, PlyRecord, SimpleRng};
 pub use manager::{SelfPlayManager, SelfPlayStats};
+pub use partition::{
+    MultiPartitionStreamingReader, PartitionConfig, PartitionedSelfPlayManager,
+    PartitionedSessionStats,
+};
 
 /// CLI引数をパースして自己対局を実行
 pub fn run_cli(args: &[String]) {
