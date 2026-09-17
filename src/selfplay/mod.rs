@@ -6,7 +6,7 @@ pub mod manager;
 
 pub use config::SelfPlayConfig;
 pub use csa::CsaSerializer;
-pub use dataset::{DatasetEntry, DatasetHandler};
+pub use dataset::{DatasetEntry, DatasetHandler, StreamingBatchReader};
 pub use game::{GameRecord, GameResult, GameRunner, PlyRecord, SimpleRng};
 pub use manager::{SelfPlayManager, SelfPlayStats};
 

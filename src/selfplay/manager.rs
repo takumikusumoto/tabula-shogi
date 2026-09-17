@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SelfPlayStats {
     pub completed_games: usize,
     pub black_wins: usize,
@@ -18,6 +18,8 @@ pub struct SelfPlayStats {
     pub draws_sennichite: usize,
     pub draws_max_plies: usize,
     pub total_plies: usize,
+    /// ファイル書き込みまたはスレッド実行中に発生した異常エラー件数
+    pub io_errors: usize,
 }
 
 impl SelfPlayStats {
@@ -45,8 +47,8 @@ impl SelfPlayManager {
 
         println!("=== TabulaShogi Self-Play Pipeline ===");
         println!(
-            "Games: {}, Threads: {}, Depth: {}, RandomOpening: {} plies",
-            num_games, num_threads, config.depth, config.random_opening_plies
+            "Games: {}, Threads: {}, Depth: {}, RandomOpening: {} plies, StartGameId: {}",
+            num_games, num_threads, config.depth, config.random_opening_plies, config.start_game_id
         );
         if let Some(ref csa) = config.csa_output {
             println!("CSA Output: {csa}");
@@ -84,46 +86,72 @@ impl SelfPlayManager {
         for thread_id in 0..num_threads {
             let counter = Arc::clone(&game_counter);
             let stats_lock = Arc::clone(&stats);
-            let cfg = config.clone();
             let csa_lock = csa_file.clone();
             let data_lock = data_file.clone();
+            let cfg = config.clone();
 
             let handle = thread::spawn(move || {
                 let mut engine =
                     SearchEngine::new(cfg.tt_size_mb).with_eval_mode(cfg.eval_mode.clone());
                 loop {
-                    let game_id = counter.fetch_add(1, Ordering::SeqCst);
-                    if game_id >= num_games {
+                    let game_idx = counter.fetch_add(1, Ordering::SeqCst);
+                    if game_idx >= num_games {
                         break;
                     }
+                    let global_game_id = cfg.start_game_id + game_idx;
 
-                    // 対局ごとにユニークなシードを生成（シード重複による同一棋譜ループを根絶）
+                    // 対局ごとにユニークなシードを生成（分割パート間・スレッド間で完全一意）
                     let game_seed = cfg
                         .seed
-                        .wrapping_add((game_id as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
+                        .wrapping_add((global_game_id as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
                         ^ ((thread_id as u64 + 1).wrapping_mul(0x517cc1b727220a95));
                     let mut game_rng = SimpleRng::new(game_seed);
 
                     let record =
-                        GameRunner::play_game(game_id + 1, &cfg, &mut engine, &mut game_rng);
+                        GameRunner::play_game(global_game_id + 1, &cfg, &mut engine, &mut game_rng);
 
-                    // CSA書き出し
+                    // CSA書き出し (エラー検知・伝播)
                     if let Some(ref lock) = csa_lock {
                         let csa_str = CsaSerializer::serialize_game(&record);
                         let mut file = lock.lock().unwrap();
-                        let _ = file.write_all(csa_str.as_bytes());
-                        let _ = file.flush();
+                        if let Err(e) = file
+                            .write_all(csa_str.as_bytes())
+                            .and_then(|_| file.flush())
+                        {
+                            eprintln!("\n[Error] CSA write/flush failed: {e}");
+                            let mut s = stats_lock.lock().unwrap();
+                            s.io_errors += 1;
+                        }
                     }
 
-                    // データセット書き出し
+                    // データセット書き出し (エラー検知・伝播)
                     if let Some(ref lock) = data_lock {
                         let entries: Vec<DatasetEntry> =
                             DatasetHandler::extract_entries(&record, cfg.random_opening_plies + 1);
                         let mut file = lock.lock().unwrap();
+                        let mut write_err = false;
                         for entry in entries {
-                            let _ = file.write_all(DatasetHandler::format_entry(&entry).as_bytes());
+                            if let Err(e) =
+                                file.write_all(DatasetHandler::format_entry(&entry).as_bytes())
+                            {
+                                eprintln!("\n[Error] Dataset write failed: {e}");
+                                write_err = true;
+                                break;
+                            }
                         }
-                        let _ = file.flush();
+                        if !write_err {
+                            match file.flush() {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    eprintln!("\n[Error] Dataset flush failed: {e}");
+                                    write_err = true;
+                                }
+                            }
+                        }
+                        if write_err {
+                            let mut s = stats_lock.lock().unwrap();
+                            s.io_errors += 1;
+                        }
                     }
 
                     // 統計更新
@@ -149,7 +177,11 @@ impl SelfPlayManager {
         }
 
         for h in handles {
-            let _ = h.join();
+            if let Err(e) = h.join() {
+                eprintln!("\n[Error] Self-play worker thread panicked: {:?}", e);
+                let mut s = stats.lock().unwrap();
+                s.io_errors += 1;
+            }
         }
 
         println!();
@@ -188,13 +220,6 @@ impl SelfPlayManager {
         );
         println!("======================================");
 
-        SelfPlayStats {
-            completed_games: final_stats.completed_games,
-            black_wins: final_stats.black_wins,
-            white_wins: final_stats.white_wins,
-            draws_sennichite: final_stats.draws_sennichite,
-            draws_max_plies: final_stats.draws_max_plies,
-            total_plies: final_stats.total_plies,
-        }
+        final_stats.clone()
     }
 }

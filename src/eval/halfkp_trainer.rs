@@ -1,10 +1,32 @@
 use super::halfkp::{HALFKP_HIDDEN_SIZE, HALFKP_INPUT_SIZE, HalfKPEvaluator, MAX_EVAL_CP};
 use std::collections::HashMap;
+use std::io::{self, Read, Write};
+
+/// バッチ学習ステップの各種損失統計
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrainStepLoss {
+    /// 予測勝率と勝敗教師信号の平均二乗誤差 (MSE)
+    pub mse_loss: f32,
+    /// 前活性 (Preactivation) の [0, 64] 逸脱に対する Range Penalty
+    pub range_loss: f32,
+    /// 総損失 (mse_loss + range_loss)
+    pub total_loss: f32,
+}
+
+impl TrainStepLoss {
+    pub fn zero() -> Self {
+        Self {
+            mse_loss: 0.0,
+            range_loss: 0.0,
+            total_loss: 0.0,
+        }
+    }
+}
 
 /// ゼロ外部依存のスクラッチ HalfKP バックプロパゲーション学習器
 /// - 特徴量次元: 204,120 (自玉81 × 全駒2,520)
 /// - 隠れ層: 128 (先手128 + 後手128 = 256次元結合)
-/// - 最適化手法: スパース AdamW (バッチ内出現特徴量のみ追跡・更新)
+/// - 最適化手法: スパース AdamW (PyTorch SparseAdam 準拠のローカル更新ステップ)
 /// - 活性化関数: ClippedReLU (0.0..=64.0)
 /// - 評価値スケール: Evaluator と完全一致 (output / 128 = cp)
 pub struct HalfKPTrainer {
@@ -14,16 +36,18 @@ pub struct HalfKPTrainer {
     pub output_bias: f32,
 
     // AdamW モーメンタム状態 (スパース特徴量重み用)
-    m_feat: Vec<[f32; HALFKP_HIDDEN_SIZE]>,
-    v_feat: Vec<[f32; HALFKP_HIDDEN_SIZE]>,
-    m_f_bias: [f32; HALFKP_HIDDEN_SIZE],
-    v_f_bias: [f32; HALFKP_HIDDEN_SIZE],
-    m_out: [f32; HALFKP_HIDDEN_SIZE * 2],
-    v_out: [f32; HALFKP_HIDDEN_SIZE * 2],
-    m_bias: f32,
-    v_bias: f32,
-    beta1_pow: f32,
-    beta2_pow: f32,
+    pub m_feat: Vec<[f32; HALFKP_HIDDEN_SIZE]>,
+    pub v_feat: Vec<[f32; HALFKP_HIDDEN_SIZE]>,
+    /// 特徴量ごとのローカル更新回数 (スパース AdamW のバイアス補正用)
+    pub step_feat: Vec<u32>,
+    pub m_f_bias: [f32; HALFKP_HIDDEN_SIZE],
+    pub v_f_bias: [f32; HALFKP_HIDDEN_SIZE],
+    pub m_out: [f32; HALFKP_HIDDEN_SIZE * 2],
+    pub v_out: [f32; HALFKP_HIDDEN_SIZE * 2],
+    pub m_bias: f32,
+    pub v_bias: f32,
+    pub beta1_pow: f32,
+    pub beta2_pow: f32,
 }
 
 impl Default for HalfKPTrainer {
@@ -91,6 +115,7 @@ impl HalfKPTrainer {
             output_bias,
             m_feat: vec![[0.0f32; HALFKP_HIDDEN_SIZE]; HALFKP_INPUT_SIZE],
             v_feat: vec![[0.0f32; HALFKP_HIDDEN_SIZE]; HALFKP_INPUT_SIZE],
+            step_feat: vec![0u32; HALFKP_INPUT_SIZE],
             m_f_bias: [0.0f32; HALFKP_HIDDEN_SIZE],
             v_f_bias: [0.0f32; HALFKP_HIDDEN_SIZE],
             m_out: [0.0f32; HALFKP_HIDDEN_SIZE * 2],
@@ -209,10 +234,15 @@ impl HalfKPTrainer {
     /// - batch: `&[(mover_feats, opp_feats, target)]` (target: 0.0=敗北, 0.5=引分, 1.0=勝利)
     /// - lr: 学習率 (例: 0.001)
     /// - k: シグモイド感度係数 (通常 600.0)
-    /// - 戻り値: 平均二乗誤差 (MSE Loss)
-    pub fn train_batch(&mut self, batch: &[(Vec<usize>, Vec<usize>, f32)], lr: f32, k: f32) -> f32 {
+    /// - 戻り値: `TrainStepLoss` (MSE損失, Range Penalty損失, 総損失)
+    pub fn train_batch(
+        &mut self,
+        batch: &[(Vec<usize>, Vec<usize>, f32)],
+        lr: f32,
+        k: f32,
+    ) -> TrainStepLoss {
         if batch.is_empty() {
-            return 0.0;
+            return TrainStepLoss::zero();
         }
 
         let beta1 = 0.9f32;
@@ -226,7 +256,8 @@ impl HalfKPTrainer {
         let mut grad_out_w = [0.0f32; HALFKP_HIDDEN_SIZE * 2];
         let mut grad_out_b = 0.0f32;
         let mut grad_feature_biases = [0.0f32; HALFKP_HIDDEN_SIZE];
-        let mut total_loss = 0.0f32;
+        let mut total_mse_loss = 0.0f32;
+        let mut total_range_loss = 0.0f32;
 
         let mut active_feature_updates: HashMap<usize, [f32; HALFKP_HIDDEN_SIZE]> = HashMap::new();
 
@@ -236,7 +267,7 @@ impl HalfKPTrainer {
 
             let pred = Self::sigmoid(score_cp, k);
             let error = pred - target; // (予測 - 教師信号)
-            total_loss += error * error;
+            total_mse_loss += error * error;
 
             // dL / d_score
             let d_sigmoid = pred * (1.0 - pred) * ln10_div_k;
@@ -271,14 +302,19 @@ impl HalfKPTrainer {
                 } else {
                     0.0
                 };
-                let range_penalty = if m_acc[i] < 0.0 {
-                    lambda_range * m_acc[i]
+                let (range_grad, range_loss) = if m_acc[i] < 0.0 {
+                    (
+                        lambda_range * m_acc[i],
+                        0.5 * lambda_range * m_acc[i] * m_acc[i],
+                    )
                 } else if m_acc[i] > 64.0 {
-                    lambda_range * (m_acc[i] - 64.0)
+                    let diff = m_acc[i] - 64.0;
+                    (lambda_range * diff, 0.5 * lambda_range * diff * diff)
                 } else {
-                    0.0
+                    (0.0, 0.0)
                 };
-                d_m_acc[i] = task_grad + range_penalty;
+                total_range_loss += range_loss;
+                d_m_acc[i] = task_grad + range_grad;
             }
 
             let mut d_o_acc = [0.0f32; HALFKP_HIDDEN_SIZE];
@@ -289,14 +325,19 @@ impl HalfKPTrainer {
                 } else {
                     0.0
                 };
-                let range_penalty = if o_acc[i] < 0.0 {
-                    lambda_range * o_acc[i]
+                let (range_grad, range_loss) = if o_acc[i] < 0.0 {
+                    (
+                        lambda_range * o_acc[i],
+                        0.5 * lambda_range * o_acc[i] * o_acc[i],
+                    )
                 } else if o_acc[i] > 64.0 {
-                    lambda_range * (o_acc[i] - 64.0)
+                    let diff = o_acc[i] - 64.0;
+                    (lambda_range * diff, 0.5 * lambda_range * diff * diff)
                 } else {
-                    0.0
+                    (0.0, 0.0)
                 };
-                d_o_acc[i] = task_grad + range_penalty;
+                total_range_loss += range_loss;
+                d_o_acc[i] = task_grad + range_grad;
             }
 
             // 特徴量バイアス勾配蓄積
@@ -340,13 +381,12 @@ impl HalfKPTrainer {
             *g /= batch_size_f;
         }
 
-        // AdamW パワー更新
+        // AdamW 密パラメータ更新用バイアス補正係数 (出力層・バイアス)
         self.beta1_pow *= beta1;
         self.beta2_pow *= beta2;
         let one_minus_beta1 = 1.0 - self.beta1_pow;
         let one_minus_beta2 = 1.0 - self.beta2_pow;
 
-        // 1. 出力層バイアス更新
         // 1. 出力層バイアス更新
         Self::adamw_step(
             &mut self.output_bias,
@@ -396,8 +436,21 @@ impl HalfKPTrainer {
             );
         }
 
-        // 4. スパース特徴量重み更新
+        // 4. スパース特徴量重み更新 (PyTorch SparseAdam 準拠のローカルタイムステップ)
         for (f, grad_slice) in active_feature_updates {
+            let step = self.step_feat[f].saturating_add(1);
+            self.step_feat[f] = step;
+            let one_minus_b1_f = if step > 1000 {
+                1.0
+            } else {
+                1.0 - beta1.powi(step as i32)
+            };
+            let one_minus_b2_f = if step > 10000 {
+                1.0
+            } else {
+                1.0 - beta2.powi(step as i32)
+            };
+
             let m_slice = &mut self.m_feat[f];
             let v_slice = &mut self.v_feat[f];
             let w_slice = &mut self.feature_weights[f];
@@ -411,14 +464,185 @@ impl HalfKPTrainer {
                     lr,
                     beta1,
                     beta2,
-                    one_minus_beta1,
-                    one_minus_beta2,
+                    one_minus_b1_f,
+                    one_minus_b2_f,
                     epsilon,
                     weight_decay,
                 );
             }
         }
 
-        total_loss / batch_size_f
+        let mse = total_mse_loss / batch_size_f;
+        let range = total_range_loss / batch_size_f;
+        TrainStepLoss {
+            mse_loss: mse,
+            range_loss: range,
+            total_loss: mse + range,
+        }
+    }
+
+    /// Trainer 状態（浮動小数点重み、Adam モーメンタム、ローカル更新回数）をバイナリ保存
+    pub fn save_checkpoint(&self, path: &str) -> io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = io::BufWriter::new(file);
+
+        writer.write_all(b"TB_HKPCK")?;
+        writer.write_all(&self.beta1_pow.to_le_bytes())?;
+        writer.write_all(&self.beta2_pow.to_le_bytes())?;
+        writer.write_all(&self.output_bias.to_le_bytes())?;
+        writer.write_all(&self.m_bias.to_le_bytes())?;
+        writer.write_all(&self.v_bias.to_le_bytes())?;
+
+        for &b in &self.feature_biases {
+            writer.write_all(&b.to_le_bytes())?;
+        }
+        for &m in &self.m_f_bias {
+            writer.write_all(&m.to_le_bytes())?;
+        }
+        for &v in &self.v_f_bias {
+            writer.write_all(&v.to_le_bytes())?;
+        }
+
+        for &w in &self.output_weights {
+            writer.write_all(&w.to_le_bytes())?;
+        }
+        for &m in &self.m_out {
+            writer.write_all(&m.to_le_bytes())?;
+        }
+        for &v in &self.v_out {
+            writer.write_all(&v.to_le_bytes())?;
+        }
+
+        for row in &self.feature_weights {
+            for &w in row {
+                writer.write_all(&w.to_le_bytes())?;
+            }
+        }
+        for row in &self.m_feat {
+            for &m in row {
+                writer.write_all(&m.to_le_bytes())?;
+            }
+        }
+        for row in &self.v_feat {
+            for &v in row {
+                writer.write_all(&v.to_le_bytes())?;
+            }
+        }
+        for &s in &self.step_feat {
+            writer.write_all(&s.to_le_bytes())?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// Trainer 状態をバイナリから完全復元
+    pub fn load_checkpoint(path: &str) -> Result<Self, String> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("Failed to open HalfKP checkpoint '{path}': {e}"))?;
+        let mut reader = io::BufReader::new(file);
+
+        let mut magic = [0u8; 8];
+        reader
+            .read_exact(&mut magic)
+            .map_err(|e| format!("Failed to read checkpoint magic: {e}"))?;
+        if &magic != b"TB_HKPCK" {
+            return Err("Invalid HalfKP checkpoint magic header".to_string());
+        }
+
+        let read_f32 = |r: &mut io::BufReader<std::fs::File>| -> Result<f32, String> {
+            let mut buf = [0u8; 4];
+            r.read_exact(&mut buf)
+                .map_err(|e| format!("Checkpoint read f32 error: {e}"))?;
+            Ok(f32::from_le_bytes(buf))
+        };
+        let read_u32 = |r: &mut io::BufReader<std::fs::File>| -> Result<u32, String> {
+            let mut buf = [0u8; 4];
+            r.read_exact(&mut buf)
+                .map_err(|e| format!("Checkpoint read u32 error: {e}"))?;
+            Ok(u32::from_le_bytes(buf))
+        };
+
+        let beta1_pow = read_f32(&mut reader)?;
+        let beta2_pow = read_f32(&mut reader)?;
+        let output_bias = read_f32(&mut reader)?;
+        let m_bias = read_f32(&mut reader)?;
+        let v_bias = read_f32(&mut reader)?;
+
+        let mut feature_biases = [0.0f32; HALFKP_HIDDEN_SIZE];
+        for b in &mut feature_biases {
+            *b = read_f32(&mut reader)?;
+        }
+        let mut m_f_bias = [0.0f32; HALFKP_HIDDEN_SIZE];
+        for m in &mut m_f_bias {
+            *m = read_f32(&mut reader)?;
+        }
+        let mut v_f_bias = [0.0f32; HALFKP_HIDDEN_SIZE];
+        for v in &mut v_f_bias {
+            *v = read_f32(&mut reader)?;
+        }
+
+        let mut output_weights = [0.0f32; HALFKP_HIDDEN_SIZE * 2];
+        for w in &mut output_weights {
+            *w = read_f32(&mut reader)?;
+        }
+        let mut m_out = [0.0f32; HALFKP_HIDDEN_SIZE * 2];
+        for m in &mut m_out {
+            *m = read_f32(&mut reader)?;
+        }
+        let mut v_out = [0.0f32; HALFKP_HIDDEN_SIZE * 2];
+        for v in &mut v_out {
+            *v = read_f32(&mut reader)?;
+        }
+
+        let mut feature_weights = Vec::with_capacity(HALFKP_INPUT_SIZE);
+        for _ in 0..HALFKP_INPUT_SIZE {
+            let mut row = [0.0f32; HALFKP_HIDDEN_SIZE];
+            for w in &mut row {
+                *w = read_f32(&mut reader)?;
+            }
+            feature_weights.push(row);
+        }
+
+        let mut m_feat = Vec::with_capacity(HALFKP_INPUT_SIZE);
+        for _ in 0..HALFKP_INPUT_SIZE {
+            let mut row = [0.0f32; HALFKP_HIDDEN_SIZE];
+            for m in &mut row {
+                *m = read_f32(&mut reader)?;
+            }
+            m_feat.push(row);
+        }
+
+        let mut v_feat = Vec::with_capacity(HALFKP_INPUT_SIZE);
+        for _ in 0..HALFKP_INPUT_SIZE {
+            let mut row = [0.0f32; HALFKP_HIDDEN_SIZE];
+            for v in &mut row {
+                *v = read_f32(&mut reader)?;
+            }
+            v_feat.push(row);
+        }
+
+        let mut step_feat = Vec::with_capacity(HALFKP_INPUT_SIZE);
+        for _ in 0..HALFKP_INPUT_SIZE {
+            step_feat.push(read_u32(&mut reader)?);
+        }
+
+        Ok(HalfKPTrainer {
+            feature_weights,
+            feature_biases,
+            output_weights,
+            output_bias,
+            m_feat,
+            v_feat,
+            step_feat,
+            m_f_bias,
+            v_f_bias,
+            m_out,
+            v_out,
+            m_bias,
+            v_bias,
+            beta1_pow,
+            beta2_pow,
+        })
     }
 }

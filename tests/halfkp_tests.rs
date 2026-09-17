@@ -188,3 +188,88 @@ fn test_halfkp_search_integration() {
         engine.nodes()
     );
 }
+
+#[test]
+fn test_halfkp_save_load_roundtrip_and_boundary_checks() {
+    let mut eval = HalfKPEvaluator::new();
+    // 非ゼロ重みの設定
+    for row in eval.feature_weights.iter_mut().take(100) {
+        row[0] = 42;
+        row[127] = -99;
+    }
+    eval.feature_biases[0] = 15;
+    eval.feature_biases[127] = -30;
+    eval.output_weights[0] = 120;
+    eval.output_weights[255] = -240;
+    eval.output_bias = 777;
+
+    let path = "target/test_halfkp_nonzero.bin";
+    eval.save_to_file(path)
+        .expect("Failed to save HalfKP model");
+
+    let loaded = HalfKPEvaluator::load_from_file(path).expect("Failed to load HalfKP model");
+    let _ = std::fs::remove_file(path);
+
+    assert_eq!(eval.output_bias, loaded.output_bias);
+    assert_eq!(eval.output_weights, loaded.output_weights);
+    assert_eq!(eval.feature_biases, loaded.feature_biases);
+    assert_eq!(eval.feature_weights[0], loaded.feature_weights[0]);
+    assert_eq!(eval.feature_weights[99], loaded.feature_weights[99]);
+
+    let pos = Position::startpos();
+    assert_eq!(eval.evaluate(&pos), loaded.evaluate(&pos));
+
+    // 境界検証テスト: 途中で切れたファイル (100バイト)
+    let corrupted_path = "target/corrupted_halfkp.bin";
+    std::fs::write(corrupted_path, vec![0u8; 100]).unwrap();
+    let res = HalfKPEvaluator::load_from_file(corrupted_path);
+    let _ = std::fs::remove_file(corrupted_path);
+    assert!(
+        res.is_err(),
+        "Truncated model file must return Err, not panic"
+    );
+}
+
+#[test]
+fn test_halfkp_search_accumulator_sync_with_full_recomputation() {
+    use std::sync::Arc;
+    use tabula_shogi::eval::EvalMode;
+    use tabula_shogi::search::SearchEngine;
+
+    let mut eval_inst = HalfKPEvaluator::new();
+    // 非ゼロ重みを設定して評価値の差異を鋭敏に検出
+    for row in eval_inst.feature_weights.iter_mut().take(500) {
+        row[0] = 25;
+        row[63] = -18;
+    }
+    eval_inst.output_weights[0] = 40;
+    eval_inst.output_weights[128] = -35;
+    eval_inst.output_bias = 100;
+
+    let eval = Arc::new(eval_inst);
+    let mut engine = SearchEngine::new(16).with_eval_mode(EvalMode::HalfKP(Arc::clone(&eval)));
+    engine.use_book = false;
+
+    let mut pos = Position::startpos();
+    let mut rng = SimpleRng::new(0xABCDEF1234567890);
+
+    // 60 手対局を進行しながら、各手番でエンジンのルートアキュムレータによる評価値と全再計算評価値の一致を検証
+    for ply in 1..=60 {
+        engine.init_root_accumulator(&pos);
+        let root_acc = engine.halfkp_accumulators[0];
+        let diff_eval = eval.evaluate_with_accumulator(&pos, &root_acc);
+        let full_eval = eval.evaluate(&pos);
+
+        assert_eq!(
+            diff_eval, full_eval,
+            "Search accumulator root evaluation mismatch at ply {ply}: diff={diff_eval} vs full={full_eval}"
+        );
+
+        let moves = MoveGenerator::generate_legal_moves(&mut pos);
+        if moves.is_empty() {
+            break;
+        }
+        let mv = moves[rng.gen_range(moves.len())];
+        pos.do_move(mv);
+    }
+}

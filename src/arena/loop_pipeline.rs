@@ -185,6 +185,7 @@ impl SelfImprovementLoop {
                     data_output: Some(config.data_path.clone()),
                     eval_mode: EvalMode::Nnue(Arc::new(cand_eval)),
                     seed: gen_seed.wrapping_add(0x85ebca6b),
+                    start_game_id: champ_games,
                     ..Default::default()
                 };
                 SelfPlayManager::run(sp_cfg_cand);
@@ -197,6 +198,7 @@ impl SelfImprovementLoop {
                     data_output: Some(config.data_path.clone()),
                     eval_mode: current_best_eval.clone(),
                     seed: gen_seed.wrapping_add(0x85ebca6b),
+                    start_game_id: champ_games,
                     ..Default::default()
                 };
                 SelfPlayManager::run(sp_cfg_fallback);

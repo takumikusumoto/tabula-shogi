@@ -25,6 +25,8 @@ pub struct SelfPlayConfig {
     pub eval_mode: crate::eval::EvalMode,
     /// ソフトマックス温度サンプリングを行う手数上限 (これ以降は決定論的最善手)
     pub temperature_plies: usize,
+    /// 対局IDの開始オフセット (分割生成時のシード一意性を保証)
+    pub start_game_id: usize,
 }
 
 impl Default for SelfPlayConfig {
@@ -42,6 +44,7 @@ impl Default for SelfPlayConfig {
             seed: 0x9E3779B97F4A7C15, // 黄金比基底シード
             eval_mode: crate::eval::EvalMode::Hce,
             temperature_plies: 24,
+            start_game_id: 0,
         }
     }
 }

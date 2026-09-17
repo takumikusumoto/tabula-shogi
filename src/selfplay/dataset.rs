@@ -271,3 +271,41 @@ impl DatasetHandler {
         successful_entries.into_inner().unwrap()
     }
 }
+
+/// 巨大データセット（数百万〜1億局面）をメモリ 500MB 以内で省メモリにバッチ読み込みするストリーミングローダー
+pub struct StreamingBatchReader {
+    reader: BufReader<File>,
+    batch_size: usize,
+}
+
+impl StreamingBatchReader {
+    /// 新規ストリーミングリーダーを生成
+    pub fn new(path: &str, batch_size: usize) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        Ok(Self { reader, batch_size })
+    }
+
+    /// 次のバッチを読み込む。ファイルの末尾 (EOF) に到達した場合は None を返す。
+    pub fn next_batch(&mut self) -> io::Result<Option<Vec<DatasetEntry>>> {
+        let mut batch = Vec::with_capacity(self.batch_size);
+        let mut line = String::new();
+
+        while batch.len() < self.batch_size {
+            line.clear();
+            let bytes_read = self.reader.read_line(&mut line)?;
+            if bytes_read == 0 {
+                break; // EOF
+            }
+            if let Some(entry) = DatasetHandler::parse_entry(&line) {
+                batch.push(entry);
+            }
+        }
+
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(batch))
+        }
+    }
+}

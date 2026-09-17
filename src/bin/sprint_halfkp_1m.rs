@@ -123,6 +123,7 @@ fn generate_selfplay_data(cfg: &SprintConfig) -> (Vec<DatasetEntry>, std::time::
         seed: 0x9E3779B97F4A7C15,
         eval_mode: EvalMode::Hce,
         temperature_plies: 24,
+        start_game_id: 0,
     };
 
     let start = Instant::now();
@@ -245,7 +246,7 @@ fn train_halfkp_sprint(
             let batch = &samples[start_idx..end_idx];
 
             let loss = trainer.train_batch(batch, cfg.lr, 600.0);
-            epoch_loss += loss * batch.len() as f32;
+            epoch_loss += loss.mse_loss * batch.len() as f32;
             processed += batch.len();
         }
 

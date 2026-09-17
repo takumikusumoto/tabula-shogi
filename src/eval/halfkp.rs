@@ -479,15 +479,15 @@ impl HalfKPEvaluator {
             Color::White => (&acc.accumulation[1], &acc.accumulation[0]),
         };
 
-        let mut output = self.output_bias;
+        let mut output = self.output_bias as i64;
         for i in 0..HALFKP_HIDDEN_SIZE {
-            let m_val = mover_acc[i].clamp(0, 64);
-            let o_val = opp_acc[i].clamp(0, 64);
-            output += m_val * (self.output_weights[i] as i32);
-            output += o_val * (self.output_weights[HALFKP_HIDDEN_SIZE + i] as i32);
+            let m_val = mover_acc[i].clamp(0, 64) as i64;
+            let o_val = opp_acc[i].clamp(0, 64) as i64;
+            output += m_val * (self.output_weights[i] as i64);
+            output += o_val * (self.output_weights[HALFKP_HIDDEN_SIZE + i] as i64);
         }
 
-        let raw_cp = output / 128;
+        let raw_cp = (output / 128) as i32;
         raw_cp.clamp(-MAX_EVAL_CP, MAX_EVAL_CP)
     }
 
@@ -524,8 +524,17 @@ impl HalfKPEvaluator {
     pub fn load_from_file(path: &str) -> Result<Self, String> {
         let bytes =
             std::fs::read(path).map_err(|e| format!("Failed to read HalfKP file '{path}': {e}"))?;
-        if bytes.len() < 16 {
-            return Err("HalfKP file too short".to_string());
+        let expected_len = 16
+            + HALFKP_INPUT_SIZE * HALFKP_HIDDEN_SIZE * 2
+            + HALFKP_HIDDEN_SIZE * 2
+            + (HALFKP_HIDDEN_SIZE * 2) * 2
+            + 4;
+        if bytes.len() != expected_len {
+            return Err(format!(
+                "HalfKP file size mismatch: got {} bytes, expected {} bytes",
+                bytes.len(),
+                expected_len
+            ));
         }
         if &bytes[0..8] != HALFKP_MAGIC {
             return Err("Invalid HalfKP magic header".to_string());

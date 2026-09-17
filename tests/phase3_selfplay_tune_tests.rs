@@ -108,6 +108,7 @@ fn test_selfplay_single_game_simulation() {
         seed: 12345,
         eval_mode: tabula_shogi::eval::EvalMode::Hce,
         temperature_plies: 2,
+        start_game_id: 0,
     };
 
     let mut engine = tabula_shogi::search::SearchEngine::new(config.tt_size_mb);
@@ -140,6 +141,7 @@ fn test_selfplay_manager_small_batch() {
         seed: 99999,
         eval_mode: tabula_shogi::eval::EvalMode::Hce,
         temperature_plies: 2,
+        start_game_id: 0,
     };
 
     let stats = SelfPlayManager::run(config);
@@ -249,4 +251,42 @@ fn test_dataset_relabel_deep() {
             "Score should be re-evaluated and updated"
         );
     }
+}
+
+#[test]
+fn test_streaming_batch_reader() {
+    use tabula_shogi::selfplay::StreamingBatchReader;
+
+    let test_path = "target/test_streaming_dataset.tsv";
+    let pos_start = Position::startpos();
+    let entries = vec![
+        DatasetEntry {
+            sfen: pos_start.to_sfen(),
+            score: 10,
+            result: 1.0,
+            move_usi: "7g7f".to_string(),
+        };
+        15
+    ];
+    DatasetHandler::append_to_file(test_path, &entries).expect("Failed to write test dataset");
+
+    // バッチサイズ 4 でストリーミング読込 (4, 4, 4, 3, None)
+    let mut reader = StreamingBatchReader::new(test_path, 4).expect("Failed to open reader");
+    let mut total_read = 0;
+    let mut batch_count = 0;
+
+    while let Some(batch) = reader.next_batch().expect("Failed to read next batch") {
+        batch_count += 1;
+        total_read += batch.len();
+        if batch_count <= 3 {
+            assert_eq!(batch.len(), 4);
+        } else {
+            assert_eq!(batch.len(), 3);
+        }
+    }
+
+    assert_eq!(total_read, 15);
+    assert_eq!(batch_count, 4);
+
+    let _ = std::fs::remove_file(test_path);
 }
