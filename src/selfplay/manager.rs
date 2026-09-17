@@ -111,8 +111,10 @@ impl SelfPlayManager {
                         game_seed
                     });
 
-                    let record =
-                        GameRunner::play_game(global_game_id + 1, &cfg, &mut engine, &mut game_rng);
+                    let record = {
+                        engine.clear();
+                        GameRunner::play_game(global_game_id + 1, &cfg, &mut engine, &mut game_rng)
+                    };
 
                     // CSA書き出し (エラー検知・伝播)
                     if let Some(ref lock) = csa_lock {

@@ -541,8 +541,9 @@ impl HalfKPTrainer {
         drop(writer);
 
         // 置換前に既存の正常なチェックポイントを直前世代バックアップ (.bak) として確保
+        // (バックアップ作成に失敗した場合はエラーを返して既存ファイルを保護)
         if std::path::Path::new(path).exists() {
-            let _ = std::fs::copy(path, &bak_path);
+            std::fs::copy(path, &bak_path)?;
             let _ = std::fs::remove_file(path);
         }
 
