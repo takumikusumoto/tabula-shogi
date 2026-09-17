@@ -119,7 +119,7 @@ fn search_outcome_prevents_book_zero_overwrite_and_tracks_abort() {
         result: 1.0,
         move_usi: "7g7f".to_string(),
     }];
-    DatasetHandler::relabel_deep(&mut entries, 1, 1, 1);
+    DatasetHandler::relabel_deep(&mut entries, 1, 1, 1, &tabula_shogi::eval::EvalMode::Hce);
     assert_eq!(
         entries[0].score, expected_direct_score,
         "relabel_deep must exactly match direct search score without book zero contamination"
@@ -127,7 +127,7 @@ fn search_outcome_prevents_book_zero_overwrite_and_tracks_abort() {
 
     // 4. depth: 0 で再評価を実行した場合はガードによりスコアが維持される
     let cur_score = entries[0].score;
-    DatasetHandler::relabel_deep(&mut entries, 1, 0, 1);
+    DatasetHandler::relabel_deep(&mut entries, 1, 0, 1, &tabula_shogi::eval::EvalMode::Hce);
     assert_eq!(
         entries[0].score, cur_score,
         "depth=0 must NOT overwrite label!"

@@ -222,6 +222,7 @@ impl DatasetHandler {
         count: usize,
         depth: u8,
         threads: usize,
+        eval_mode: &crate::eval::EvalMode,
     ) -> Vec<DatasetEntry> {
         // 深さ0の探索による無意味・危険な上書きを即座に拒否
         if depth == 0 {
@@ -244,7 +245,7 @@ impl DatasetHandler {
             for chunk in slice_to_relabel.chunks_mut(chunk_size) {
                 s.spawn(|| {
                     let mut engine = crate::search::SearchEngine::new(4);
-                    engine.eval_mode = crate::eval::EvalMode::Hce;
+                    engine.eval_mode = eval_mode.clone();
                     engine.max_nodes = Some(30_000); // 1局面最大3万ノードで確実に打ち切り、ハング・長時間スタックを完全防止
                     engine.use_book = false; // 深読み再評価では定跡手をスキップし、純粋な深さNの探索評価値を算出
 

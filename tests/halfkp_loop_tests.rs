@@ -369,3 +369,28 @@ fn test_halfkp_loop_promotion_gate_permits_when_threshold_met() {
 
     clean_files();
 }
+
+#[test]
+fn test_relabel_deep_with_halfkp_champion() {
+    use std::sync::Arc;
+    use tabula_shogi::board::Position;
+    use tabula_shogi::selfplay::dataset::{DatasetEntry, DatasetHandler};
+
+    let start_pos = Position::startpos();
+    let mut entries = vec![DatasetEntry {
+        sfen: start_pos.to_sfen(),
+        score: 9999,
+        result: 0.5,
+        move_usi: "7g7f".to_string(),
+    }];
+
+    let halfkp = Arc::new(HalfKPEvaluator::new());
+    let eval_mode = EvalMode::HalfKP(halfkp);
+
+    let successes = DatasetHandler::relabel_deep(&mut entries, 1, 1, 1, &eval_mode);
+    assert_eq!(successes.len(), 1, "HalfKP deep relabeling must succeed");
+    assert_ne!(
+        entries[0].score, 9999,
+        "Score must be re-evaluated using HalfKP model"
+    );
+}

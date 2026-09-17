@@ -216,6 +216,7 @@ impl SelfImprovementLoop {
                 relabel_count,
                 relabel_depth,
                 config.threads,
+                &current_best_eval,
             );
             println!(
                 "IIZ Distillation: Successfully re-evaluated {}/{} positions at Depth {} in {:.2}s",

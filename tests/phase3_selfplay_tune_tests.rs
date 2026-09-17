@@ -242,7 +242,8 @@ fn test_dataset_relabel_deep() {
         4
     ];
 
-    let successes = DatasetHandler::relabel_deep(&mut entries, 4, 1, 2);
+    let successes =
+        DatasetHandler::relabel_deep(&mut entries, 4, 1, 2, &tabula_shogi::eval::EvalMode::Hce);
     assert_eq!(successes.len(), 4, "All valid positions should succeed");
 
     for entry in &entries {
