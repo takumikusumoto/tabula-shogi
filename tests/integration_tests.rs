@@ -424,4 +424,42 @@ mod tests {
             tabula_shogi::eval::EvalMode::Nnue(_)
         ));
     }
+
+    #[test]
+    fn test_usi_halfkp_search_e2e() {
+        use tabula_shogi::UsiHandler;
+        use tabula_shogi::search::TimeControl;
+        use tabula_shogi::usi::UsiCommand;
+
+        let mut handler = UsiHandler::new();
+
+        // 1. HalfKP モードへ明示的に切り替え
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "HalfKP".to_string(),
+        });
+        assert!(matches!(
+            handler.eval_mode(),
+            tabula_shogi::eval::EvalMode::HalfKP(_)
+        ));
+
+        // 2. 対局準備コマンド群の送信
+        handler.process_command(UsiCommand::UsiNewGame);
+        handler.process_command(UsiCommand::Position {
+            sfen: None,
+            moves: vec![],
+        });
+
+        // 3. 探索コマンドの送信 (秒読み 150ms で実際の HalfKP 探索を実行)
+        handler.process_command(UsiCommand::Go(TimeControl {
+            byoyomi: Some(150),
+            ..Default::default()
+        }));
+
+        // 探索スレッドが完了するのを待機
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // 4. 正常終了コマンドの送信
+        assert!(!handler.process_command(UsiCommand::Quit));
+    }
 }

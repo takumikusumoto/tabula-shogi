@@ -81,6 +81,9 @@ impl DatasetHandler {
 
     /// データセットファイルへ追記保存
     pub fn append_to_file(path: &str, entries: &[DatasetEntry]) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
         for entry in entries {

@@ -485,6 +485,9 @@ impl HalfKPTrainer {
     /// 一時ファイル (.tmp) への書き出し、置換前の直前世代バックアップ (.bak) 確保、およびアトミックリネームにより
     /// 314MBの書き込み途中でのクラッシュや停電による既存チェックポイントの道連れ破壊を100%防止
     pub fn save_checkpoint(&self, path: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let tmp_path = format!("{path}.tmp");
         let bak_path = format!("{path}.bak");
 

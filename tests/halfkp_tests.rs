@@ -273,3 +273,24 @@ fn test_halfkp_search_accumulator_sync_with_full_recomputation() {
         pos.do_move(mv);
     }
 }
+
+#[test]
+fn test_halfkp_save_auto_creates_parent_directories() {
+    let eval = HalfKPEvaluator::new();
+    let deep_path = "target/test_deep_dir_auto_create/sub/models/test_model.bin";
+    let _ = std::fs::remove_dir_all("target/test_deep_dir_auto_create");
+
+    // 親ディレクトリが存在しない状態から save_to_file が成功すること
+    eval.save_to_file(deep_path)
+        .expect("save_to_file must automatically create parent directories");
+    assert!(
+        std::path::Path::new(deep_path).exists(),
+        "Saved model file must exist"
+    );
+
+    let loaded = HalfKPEvaluator::load_from_file(deep_path)
+        .expect("Must be able to load model from created path");
+    assert_eq!(eval.output_bias, loaded.output_bias);
+
+    let _ = std::fs::remove_dir_all("target/test_deep_dir_auto_create");
+}

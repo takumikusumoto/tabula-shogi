@@ -234,3 +234,24 @@ fn test_halfkp_trainer_checkpoint_size_validation() {
         Ok(_) => panic!("Corrupted or truncated checkpoint file must return Err, not Ok"),
     }
 }
+
+#[test]
+fn test_halfkp_trainer_checkpoint_auto_creates_parent_directories() {
+    let trainer = HalfKPTrainer::new();
+    let deep_path = "target/test_deep_dir_ckpt_auto/sub/models/test_ckpt.bin";
+    let _ = std::fs::remove_dir_all("target/test_deep_dir_ckpt_auto");
+
+    trainer
+        .save_checkpoint(deep_path)
+        .expect("save_checkpoint must automatically create parent directories");
+    assert!(
+        std::path::Path::new(deep_path).exists(),
+        "Saved checkpoint file must exist"
+    );
+
+    let loaded = HalfKPTrainer::load_checkpoint(deep_path)
+        .expect("Must be able to load checkpoint from created path");
+    assert_eq!(trainer.beta1_pow, loaded.beta1_pow);
+
+    let _ = std::fs::remove_dir_all("target/test_deep_dir_ckpt_auto");
+}

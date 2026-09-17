@@ -26,6 +26,7 @@ pub struct LoopConfig {
     pub candidate_model_path: String,
     pub candidate_ckpt_path: String,
     pub min_promotion_games: usize,
+    pub summary_path: String,
 }
 
 impl Default for LoopConfig {
@@ -47,6 +48,7 @@ impl Default for LoopConfig {
             candidate_model_path: "models/candidate_halfkp.bin".to_string(),
             candidate_ckpt_path: "models/candidate_halfkp_ckpt.bin".to_string(),
             min_promotion_games: 20,
+            summary_path: "loop_summary.csv".to_string(),
         }
     }
 }
@@ -74,6 +76,7 @@ impl SelfImprovementLoop {
         println!("Candidate Model: {}", config.candidate_model_path);
         println!("Candidate Ckpt: {}", config.candidate_ckpt_path);
         println!("Min Promotion Games: {}", config.min_promotion_games);
+        println!("Summary Log: {}", config.summary_path);
         println!("============================================================");
 
         // 初期モデルの確認 (HalfKPモデルが存在するか)
@@ -120,6 +123,7 @@ impl SelfImprovementLoop {
 
         for round in 1..=config.iterations {
             let cur_gen = start_gen + round - 1;
+            let gen_start_instant = std::time::Instant::now();
             println!(
                 "\n>>> Generation {} (Round {} / {}) <<<",
                 cur_gen, round, config.iterations
@@ -237,7 +241,7 @@ impl SelfImprovementLoop {
             );
 
             // 学習スコープを明確に区切り、Trainer(314MB)を対戦前に確実にヒープ解放
-            let candidate_eval = {
+            let (candidate_eval, init_mse, final_mse, loss_reduction) = {
                 let mut trainer = if Path::new(&config.candidate_ckpt_path).exists() {
                     match HalfKPTrainer::load_checkpoint(&config.candidate_ckpt_path) {
                         Ok(t) => {
@@ -366,7 +370,12 @@ impl SelfImprovementLoop {
                 );
                 drop(trainer);
 
-                cand_eval
+                (
+                    cand_eval,
+                    init_loss.mse_loss,
+                    final_loss.mse_loss,
+                    reduction,
+                )
             };
 
             // Step 3: アリーナ対戦 & レーティング検定 (Candidate vs Best)
@@ -425,6 +434,36 @@ impl SelfImprovementLoop {
                 &mut current_best_eval,
                 &config.best_model_path,
                 config.min_promotion_games,
+            );
+
+            // 進捗サマリログ (loop_summary.csv) への追記永続化
+            let champ_name = match &current_best_eval {
+                EvalMode::HalfKP(_) => "HalfKP",
+                EvalMode::Nnue(_) => "NNUE",
+                EvalMode::Hce => "HCE",
+            };
+            let sprt_str = match_res
+                .sprt
+                .as_ref()
+                .map(|s| format!("{:?}", s.status))
+                .unwrap_or_else(|| "None".to_string());
+            let gen_duration = gen_start_instant.elapsed().as_secs_f64();
+
+            Self::append_summary_csv(
+                &config.summary_path,
+                cur_gen,
+                champ_name,
+                gen_duration,
+                dataset.len(),
+                successful_relabelled.len(),
+                init_mse,
+                final_mse,
+                loss_reduction,
+                match_res.total_games,
+                match_res.win_rate_a,
+                match_res.elo_diff_a,
+                &sprt_str,
+                promoted,
             );
 
             // 世代番号を永続化（次回再起動時に自動で直前世代から継続可能）
@@ -514,6 +553,50 @@ impl SelfImprovementLoop {
                 );
             }
             false
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_summary_csv(
+        summary_path: &str,
+        generation: usize,
+        champ_mode: &str,
+        duration_secs: f64,
+        dataset_size: usize,
+        relabel_count: usize,
+        init_mse: f32,
+        final_mse: f32,
+        reduction_pct: f32,
+        match_games: usize,
+        win_rate: f64,
+        elo_diff: f64,
+        sprt_status: &str,
+        promoted: bool,
+    ) {
+        if let Some(parent) = Path::new(summary_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file_exists = Path::new(summary_path).exists();
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(summary_path)
+        {
+            use std::io::Write;
+            if !file_exists {
+                let _ = writeln!(
+                    file,
+                    "generation,timestamp,champion_mode,duration_secs,dataset_size,relabel_count,init_mse,final_mse,reduction_pct,match_games,win_rate,elo_diff,sprt_status,promoted"
+                );
+            }
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(
+                file,
+                "{generation},{timestamp},{champ_mode},{duration_secs:.2},{dataset_size},{relabel_count},{init_mse:.6},{final_mse:.6},{reduction_pct:.2},{match_games},{win_rate:.4},{elo_diff:+.1},{sprt_status},{promoted}"
+            );
         }
     }
 }

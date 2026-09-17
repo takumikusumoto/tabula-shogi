@@ -45,6 +45,12 @@ fn test_halfkp_autonomous_loop_single_iteration() {
         .unwrap()
         .to_string();
 
+    let summary_path = temp_dir
+        .join(format!("{prefix}_summary.csv"))
+        .to_str()
+        .unwrap()
+        .to_string();
+
     let clean_files = || {
         let _ = fs::remove_file(&data_path);
         let _ = fs::remove_file(&deep_data_path);
@@ -53,6 +59,7 @@ fn test_halfkp_autonomous_loop_single_iteration() {
         let _ = fs::remove_file(&cand_ckpt_path);
         let _ = fs::remove_file(format!("{cand_ckpt_path}.bak"));
         let _ = fs::remove_file(&state_path);
+        let _ = fs::remove_file(&summary_path);
     };
     clean_files();
 
@@ -73,6 +80,7 @@ fn test_halfkp_autonomous_loop_single_iteration() {
         candidate_model_path: cand_path.clone(),
         candidate_ckpt_path: cand_ckpt_path.clone(),
         min_promotion_games: 20,
+        summary_path: summary_path.clone(),
     };
 
     SelfImprovementLoop::run(&config);
@@ -109,6 +117,15 @@ fn test_halfkp_autonomous_loop_single_iteration() {
     );
     let saved_gen = fs::read_to_string(&state_path).unwrap();
     assert_eq!(saved_gen.trim(), "1");
+
+    // 5. 進捗サマリ CSV が出力されていることを確認
+    assert!(
+        fs::metadata(&summary_path).is_ok(),
+        "Summary CSV must be written"
+    );
+    let summary_content = fs::read_to_string(&summary_path).unwrap();
+    assert!(summary_content.contains("generation,timestamp,champion_mode"));
+    assert!(summary_content.lines().count() >= 2);
 
     clean_files();
 }
@@ -153,6 +170,11 @@ fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
         .to_str()
         .unwrap()
         .to_string();
+    let summary_path = temp_dir
+        .join(format!("{prefix}_summary.csv"))
+        .to_str()
+        .unwrap()
+        .to_string();
 
     let clean_files = || {
         let _ = fs::remove_file(&data_path);
@@ -162,6 +184,7 @@ fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
         let _ = fs::remove_file(&cand_ckpt_path);
         let _ = fs::remove_file(format!("{cand_ckpt_path}.bak"));
         let _ = fs::remove_file(&state_path);
+        let _ = fs::remove_file(&summary_path);
     };
     clean_files();
 
@@ -193,6 +216,7 @@ fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
         candidate_model_path: cand_path.clone(),
         candidate_ckpt_path: cand_ckpt_path.clone(),
         min_promotion_games: 20,
+        summary_path: summary_path.clone(),
     };
 
     SelfImprovementLoop::run(&config);

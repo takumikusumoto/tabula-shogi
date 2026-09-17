@@ -406,6 +406,12 @@ fn run_loop(args: &[String]) {
                     i += 1;
                 }
             }
+            "--summary" => {
+                if i + 1 < args.len() {
+                    config.summary_path = args[i + 1].clone();
+                    i += 1;
+                }
+            }
             "--deep-data" => {
                 if i + 1 < args.len() {
                     config.deep_data_path = args[i + 1].clone();
@@ -458,6 +464,9 @@ fn run_loop(args: &[String]) {
                 );
                 println!(
                     "        --min-games <N>     Minimum evaluation games for promotion [default: 20]"
+                );
+                println!(
+                    "        --summary <PATH>    Path to CSV progress summary log [default: loop_summary.csv]"
                 );
                 return;
             }

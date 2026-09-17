@@ -95,6 +95,11 @@ fn test_autonomous_loop_single_iteration() {
         .to_str()
         .unwrap()
         .to_string();
+    let summary_path = temp_dir
+        .join("test_loop_summary.csv")
+        .to_str()
+        .unwrap()
+        .to_string();
 
     let state_path = temp_dir
         .join("test_loop_state.txt")
@@ -113,6 +118,7 @@ fn test_autonomous_loop_single_iteration() {
     let _ = fs::remove_file(&cand_path);
     let _ = fs::remove_file(&cand_ckpt_path);
     let _ = fs::remove_file(&state_path);
+    let _ = fs::remove_file(&summary_path);
 
     let config = LoopConfig {
         iterations: 1,
@@ -131,6 +137,7 @@ fn test_autonomous_loop_single_iteration() {
         candidate_model_path: cand_path.clone(),
         candidate_ckpt_path: cand_ckpt_path.clone(),
         min_promotion_games: 20,
+        summary_path: summary_path.clone(),
     };
 
     SelfImprovementLoop::run(&config);
@@ -155,4 +162,5 @@ fn test_autonomous_loop_single_iteration() {
     let _ = fs::remove_file(&cand_path);
     let _ = fs::remove_file(&cand_ckpt_path);
     let _ = fs::remove_file(&state_path);
+    let _ = fs::remove_file(&summary_path);
 }

@@ -500,6 +500,9 @@ impl HalfKPEvaluator {
     /// バイナリファイルへ安全にアトミック保存 (TABU_HKP)
     /// 52MBのメモリ一括確保を完全排除し、一時ファイルへのBufWriter逐次書き出しとアトミックリネームで既存ファイルを保護
     pub fn save_to_file(&self, path: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let tmp_path = format!("{path}.tmp");
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = BufWriter::new(file);
