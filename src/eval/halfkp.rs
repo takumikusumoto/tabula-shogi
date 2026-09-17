@@ -16,13 +16,26 @@ pub const RESIDUAL_BOUND_CP: i32 = 25_000;
 /// 前活性を i32 で保持する堅牢な差分アキュムレータ
 /// - i16 飽和加算の不可逆性を完全に排除し、可逆な線形加減算を保証
 /// - ClippedReLU [0, 64] は評価値推論時に適用
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HalfKPAccumulator {
     pub accumulation: [[i32; HALFKP_HIDDEN_SIZE]; 2],
     pub computed: [bool; 2],
 }
 
+impl Default for HalfKPAccumulator {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl HalfKPAccumulator {
+    pub fn empty() -> Self {
+        HalfKPAccumulator {
+            accumulation: [[0i32; HALFKP_HIDDEN_SIZE]; 2],
+            computed: [false, false],
+        }
+    }
+
     pub fn new(biases: &[i16; HALFKP_HIDDEN_SIZE]) -> Self {
         let mut acc = [[0i32; HALFKP_HIDDEN_SIZE]; 2];
         for i in 0..HALFKP_HIDDEN_SIZE {
@@ -345,6 +358,112 @@ impl HalfKPEvaluator {
                     moved_piece
                 };
                 let p_to_feat = Self::piece_to_feature(to_sq, final_piece, color);
+                let feat_to = k_offset + p_to_feat;
+                Self::add_weights(&mut acc.accumulation[c_idx], &self.feature_weights[feat_to]);
+            }
+
+            acc.computed[c_idx] = true;
+        }
+    }
+
+    /// do_move 後におけるアキュムレータの高速差分更新 (Position クローン完全ゼロ)
+    pub fn update_accumulator_after_move(
+        &self,
+        acc: &mut HalfKPAccumulator,
+        pos_after: &Position,
+        mv: Move,
+    ) {
+        let us = pos_after.side_to_move.opposite();
+        let last_rec = pos_after.history.last().expect("History must have record");
+        let captured = last_rec.captured;
+
+        for color in [Color::Black, Color::White] {
+            let c_idx = color.index();
+            let k_curr = Self::get_king_sq(pos_after, color);
+
+            // 当該視点の玉が動いた場合 (直前の手が当該視点の玉の移動)
+            if mv.from().is_some()
+                && mv.drop_piece().is_none()
+                && let Some(piece) = pos_after.board[mv.to().index()]
+                && piece.piece_type == PieceType::King
+                && color == us
+            {
+                acc.accumulation[c_idx] = self.compute_accumulator_full(pos_after, color);
+                acc.computed[c_idx] = true;
+                continue;
+            }
+
+            let k_offset = k_curr.index() * HALFKP_PIECE_SIZE;
+
+            if mv.is_drop() {
+                let drop_pt = mv.drop_piece().expect("Drop move must have piece type");
+                let to_sq = mv.to();
+                let placed_piece = Piece::new(drop_pt, us);
+
+                // 1. 持ち駒から1枚減算 (使用前の手駒枚数は、現在の枚数 + 1)
+                let h_idx = drop_pt.hand_index().expect("Valid hand piece");
+                let prev_count = pos_after.hand[us.index()][h_idx] as usize + 1;
+                let is_self = us == color;
+                let h_feat = Self::hand_to_feature(drop_pt, prev_count - 1, is_self);
+                let feat_idx = k_offset + h_feat;
+                Self::sub_weights(
+                    &mut acc.accumulation[c_idx],
+                    &self.feature_weights[feat_idx],
+                );
+
+                // 2. 盤上に打たれた駒を加算
+                let p_feat = Self::piece_to_feature(to_sq, placed_piece, color);
+                let feat_idx = k_offset + p_feat;
+                Self::add_weights(
+                    &mut acc.accumulation[c_idx],
+                    &self.feature_weights[feat_idx],
+                );
+            } else {
+                let from_sq = mv.from().expect("Non-drop move must have from");
+                let to_sq = mv.to();
+                let piece_after = pos_after.board[to_sq.index()].expect("Moved piece at to_sq");
+
+                // 移動前の元駒
+                let orig_pt = if mv.is_promote() {
+                    piece_after.piece_type.unpromote()
+                } else {
+                    piece_after.piece_type
+                };
+                let moved_piece = Piece::new(orig_pt, us);
+
+                // 1. 移動元マス駒の減算
+                let p_from_feat = Self::piece_to_feature(from_sq, moved_piece, color);
+                let feat_from = k_offset + p_from_feat;
+                Self::sub_weights(
+                    &mut acc.accumulation[c_idx],
+                    &self.feature_weights[feat_from],
+                );
+
+                // 2. 捕獲駒があれば盤上から減算し、手駒へ加算
+                if let Some(cap) = captured {
+                    let p_cap_feat = Self::piece_to_feature(to_sq, cap, color);
+                    let feat_cap = k_offset + p_cap_feat;
+                    Self::sub_weights(
+                        &mut acc.accumulation[c_idx],
+                        &self.feature_weights[feat_cap],
+                    );
+
+                    // 捕獲駒は手駒へ加算 (直前の手の前の手駒枚数は、現在の手駒枚数 - 1)
+                    let unpromoted_pt = cap.piece_type.unpromote();
+                    let h_idx = unpromoted_pt.hand_index().expect("Valid hand piece");
+                    let prev_hand_count =
+                        (pos_after.hand[us.index()][h_idx] as usize).saturating_sub(1);
+                    let is_self = us == color;
+                    let h_feat = Self::hand_to_feature(unpromoted_pt, prev_hand_count, is_self);
+                    let feat_hand = k_offset + h_feat;
+                    Self::add_weights(
+                        &mut acc.accumulation[c_idx],
+                        &self.feature_weights[feat_hand],
+                    );
+                }
+
+                // 3. 移動先マス駒の加算
+                let p_to_feat = Self::piece_to_feature(to_sq, piece_after, color);
                 let feat_to = k_offset + p_to_feat;
                 Self::add_weights(&mut acc.accumulation[c_idx], &self.feature_weights[feat_to]);
             }

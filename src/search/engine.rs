@@ -98,6 +98,7 @@ pub struct SearchEngine {
     pub eval_mode: crate::eval::EvalMode,
     pub max_nodes: Option<u64>,
     pub use_book: bool,
+    pub halfkp_accumulators: Vec<crate::eval::HalfKPAccumulator>,
 }
 
 impl SearchEngine {
@@ -111,6 +112,7 @@ impl SearchEngine {
             eval_mode: crate::eval::EvalMode::Hce,
             max_nodes: None,
             use_book: true,
+            halfkp_accumulators: vec![crate::eval::HalfKPAccumulator::empty(); 128],
         };
         engine.reset_heuristics();
         engine
@@ -131,6 +133,7 @@ impl SearchEngine {
             eval_mode: crate::eval::EvalMode::Hce,
             max_nodes: None,
             use_book: true,
+            halfkp_accumulators: vec![crate::eval::HalfKPAccumulator::empty(); 128],
         };
         engine.reset_heuristics();
         engine
@@ -139,6 +142,47 @@ impl SearchEngine {
     pub fn with_eval_mode(mut self, eval_mode: crate::eval::EvalMode) -> Self {
         self.eval_mode = eval_mode;
         self
+    }
+
+    /// ルート局面でのアキュムレータ初期化 (探索開始時に一度だけ全計算)
+    pub fn init_root_accumulator(&mut self, pos: &Position) {
+        if let crate::eval::EvalMode::HalfKP(ref halfkp) = self.eval_mode {
+            self.halfkp_accumulators[0] = halfkp.compute_accumulators_full(pos);
+        }
+    }
+
+    /// do_move 直後の高速アキュムレータ差分更新ヘルパー
+    #[inline(always)]
+    pub fn update_accumulator_after_move_at_ply(
+        &mut self,
+        pos: &Position,
+        mv: Move,
+        next_ply: usize,
+    ) {
+        if let crate::eval::EvalMode::HalfKP(ref halfkp) = self.eval_mode
+            && next_ply < self.halfkp_accumulators.len()
+            && next_ply > 0
+        {
+            self.halfkp_accumulators[next_ply] = self.halfkp_accumulators[next_ply - 1];
+            halfkp.update_accumulator_after_move(&mut self.halfkp_accumulators[next_ply], pos, mv);
+        }
+    }
+
+    /// ply指定による高速局面評価 (HalfKP差分アキュムレータ活用)
+    #[inline(always)]
+    pub fn evaluate_at_ply(&self, pos: &Position, ply: usize) -> i32 {
+        match &self.eval_mode {
+            crate::eval::EvalMode::Hce => crate::eval::Evaluator::evaluate(pos),
+            crate::eval::EvalMode::Nnue(nnue) => nnue.evaluate(pos),
+            crate::eval::EvalMode::HalfKP(halfkp) => {
+                if ply < self.halfkp_accumulators.len() && self.halfkp_accumulators[ply].computed[0]
+                {
+                    halfkp.evaluate_with_accumulator(pos, &self.halfkp_accumulators[ply])
+                } else {
+                    halfkp.evaluate(pos)
+                }
+            }
+        }
     }
 
     #[inline(always)]
@@ -210,6 +254,7 @@ impl SearchEngine {
         }
 
         self.nodes = 0;
+        self.init_root_accumulator(pos);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let tc = TimeControl {
             infinite: true,
@@ -261,6 +306,7 @@ impl SearchEngine {
                 let mut current_alpha = alpha;
                 for &mv in &root_moves {
                     pos.do_move(mv);
+                    self.update_accumulator_after_move_at_ply(pos, mv, 1);
                     let score = -self.negamax(pos, depth - 1, -beta, -current_alpha, 1, true, &ctx);
                     pos.undo_move();
 
@@ -394,6 +440,7 @@ impl SearchEngine {
         }
 
         self.nodes = 0;
+        self.init_root_accumulator(pos);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let tc = TimeControl {
             infinite: true,
@@ -411,6 +458,7 @@ impl SearchEngine {
 
         for &mv in &legal_moves {
             pos.do_move(mv);
+            self.update_accumulator_after_move_at_ply(pos, mv, 1);
             let score = -self.negamax(pos, child_depth, -INF, INF, 1, true, &ctx);
             pos.undo_move();
             scored_moves.push((mv, score));
@@ -494,6 +542,7 @@ impl SearchEngine {
         }
 
         self.nodes = 0;
+        self.init_root_accumulator(pos);
         let time_mgr = TimeManager::new(tc, pos.side_to_move);
         let ctx = SearchContext {
             time_mgr: &time_mgr,
@@ -552,6 +601,7 @@ impl SearchEngine {
 
                 for &mv in &root_moves {
                     pos.do_move(mv);
+                    self.update_accumulator_after_move_at_ply(pos, mv, 1);
                     let score = -self.negamax(pos, depth - 1, -beta, -current_alpha, 1, true, &ctx);
                     pos.undo_move();
 
@@ -659,6 +709,7 @@ impl SearchEngine {
         thread_id: usize,
     ) {
         self.nodes = 0;
+        self.init_root_accumulator(pos);
         let time_mgr = TimeManager::new(tc, pos.side_to_move);
         let ctx = SearchContext {
             time_mgr: &time_mgr,
@@ -705,6 +756,7 @@ impl SearchEngine {
                 }
 
                 pos.do_move(mv);
+                self.update_accumulator_after_move_at_ply(pos, mv, 1);
                 let score = -self.negamax(pos, depth - 1, -INF, INF, 1, true, &ctx);
                 pos.undo_move();
 
@@ -766,7 +818,7 @@ impl SearchEngine {
             && self.nodes >= max_n
         {
             ctx.stop_flag.store(true, Ordering::Relaxed);
-            return self.evaluate(pos);
+            return self.evaluate_at_ply(pos, ply);
         }
         if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
             ctx.stop_flag.store(true, Ordering::Relaxed);
@@ -777,7 +829,7 @@ impl SearchEngine {
 
         // 最大探索手数 (MAX_PLY) ガード
         if ply >= 64 {
-            return self.evaluate(pos);
+            return self.evaluate_at_ply(pos, ply);
         }
 
         // 千日手判定
@@ -825,6 +877,9 @@ impl SearchEngine {
         if allow_null && !in_check && depth >= 3 && ply > 0 {
             // do_null_move はハッシュ・手番・手数を一括更新する安全なインターフェース
             pos.do_null_move();
+            if ply + 1 < self.halfkp_accumulators.len() {
+                self.halfkp_accumulators[ply + 1] = self.halfkp_accumulators[ply];
+            }
 
             let null_score = -self.negamax(
                 pos,
@@ -849,7 +904,7 @@ impl SearchEngine {
 
         // 静的評価値の事前計算 (王手がかかっていない場合)
         let static_eval = if !in_check {
-            Some(self.evaluate(pos))
+            Some(self.evaluate_at_ply(pos, ply))
         } else {
             None
         };
@@ -936,6 +991,7 @@ impl SearchEngine {
             };
 
             pos.do_move(mv);
+            self.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
 
             let mut score;
             let is_pv_move = move_count == 1;
@@ -1041,7 +1097,7 @@ impl SearchEngine {
             && self.nodes >= max_n
         {
             ctx.stop_flag.store(true, Ordering::Relaxed);
-            return self.evaluate(pos);
+            return self.evaluate_at_ply(pos, ply);
         }
         if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
             ctx.stop_flag.store(true, Ordering::Relaxed);
@@ -1051,7 +1107,7 @@ impl SearchEngine {
         }
 
         if ply >= 64 {
-            return self.evaluate(pos);
+            return self.evaluate_at_ply(pos, ply);
         }
 
         let in_check = pos.is_in_check(pos.side_to_move);
@@ -1075,6 +1131,7 @@ impl SearchEngine {
 
             for mv in evasions {
                 pos.do_move(mv);
+                self.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
                 let score = -self.quiescence(pos, -beta, -alpha, ply + 1, ctx);
                 pos.undo_move();
 
@@ -1093,7 +1150,7 @@ impl SearchEngine {
         }
 
         // 王手されていない通常局面: 静的評価（立合いスコア）
-        let stand_pat = self.evaluate(pos);
+        let stand_pat = self.evaluate_at_ply(pos, ply);
         if stand_pat >= beta {
             return beta;
         }
@@ -1124,6 +1181,7 @@ impl SearchEngine {
             }
 
             pos.do_move(mv);
+            self.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
             let score = -self.quiescence(pos, -beta, -alpha, ply + 1, ctx);
             pos.undo_move();
 

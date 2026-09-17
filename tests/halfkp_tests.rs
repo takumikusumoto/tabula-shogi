@@ -127,3 +127,64 @@ fn test_halfkp_roundtrip_serialization() {
 
     let _ = std::fs::remove_file(test_path);
 }
+
+#[test]
+fn test_halfkp_accumulator_after_move_bit_exactness() {
+    let eval = HalfKPEvaluator::new();
+    let mut pos = Position::startpos();
+    let mut diff_acc = eval.compute_accumulators_full(&pos);
+    let mut rng = SimpleRng::new(0xDEADBEEFCAFE);
+
+    for ply in 0..120 {
+        let legal_moves = MoveGenerator::generate_legal_moves(&mut pos);
+        if legal_moves.is_empty() {
+            break;
+        }
+
+        let mv_idx = (rng.next_u64() as usize) % legal_moves.len();
+        let mv = legal_moves[mv_idx];
+
+        pos.do_move(mv);
+        eval.update_accumulator_after_move(&mut diff_acc, &pos, mv);
+
+        let full_acc = eval.compute_accumulators_full(&pos);
+
+        // 先手視点・後手視点の完全一致検証
+        assert_eq!(
+            diff_acc.accumulation[0],
+            full_acc.accumulation[0],
+            "Black after_move accumulator mismatch at ply {ply}, move {}",
+            mv.to_usi()
+        );
+        assert_eq!(
+            diff_acc.accumulation[1],
+            full_acc.accumulation[1],
+            "White after_move accumulator mismatch at ply {ply}, move {}",
+            mv.to_usi()
+        );
+    }
+}
+
+#[test]
+fn test_halfkp_search_integration() {
+    use std::sync::Arc;
+    use tabula_shogi::eval::EvalMode;
+    use tabula_shogi::search::SearchEngine;
+
+    let eval = Arc::new(HalfKPEvaluator::new());
+    let mut engine = SearchEngine::new(16).with_eval_mode(EvalMode::HalfKP(eval));
+    engine.use_book = false;
+    let mut pos = Position::startpos();
+
+    // 深さ 3 の探索実行 (アキュムレータ差分更新の探索ツリー全走査)
+    let (best_move, score) = engine.search_fixed_depth(&mut pos, 3);
+
+    assert!(best_move.is_some(), "Search must return a best move");
+    assert!(engine.nodes() > 10, "Search must visit nodes in tree");
+    println!(
+        "HalfKP Search returned best move: {:?}, score: {}, nodes: {}",
+        best_move,
+        score,
+        engine.nodes()
+    );
+}
