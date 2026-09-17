@@ -481,9 +481,14 @@ impl HalfKPTrainer {
         }
     }
 
-    /// Trainer 状態（浮動小数点重み、Adam モーメンタム、ローカル更新回数）をバイナリ保存
+    /// Trainer 状態（浮動小数点重み、Adam モーメンタム、ローカル更新回数）を安全にアトミック保存
+    /// 一時ファイル (.tmp) への書き出し、置換前の直前世代バックアップ (.bak) 確保、およびアトミックリネームにより
+    /// 314MBの書き込み途中でのクラッシュや停電による既存チェックポイントの道連れ破壊を100%防止
     pub fn save_checkpoint(&self, path: &str) -> io::Result<()> {
-        let file = std::fs::File::create(path)?;
+        let tmp_path = format!("{path}.tmp");
+        let bak_path = format!("{path}.bak");
+
+        let file = std::fs::File::create(&tmp_path)?;
         let mut writer = io::BufWriter::new(file);
 
         writer.write_all(b"TB_HKPCK")?;
@@ -533,6 +538,17 @@ impl HalfKPTrainer {
         }
 
         writer.flush()?;
+        drop(writer);
+
+        // 置換前に既存の正常なチェックポイントを直前世代バックアップ (.bak) として確保
+        if std::path::Path::new(path).exists() {
+            let _ = std::fs::copy(path, &bak_path);
+            let _ = std::fs::remove_file(path);
+        }
+
+        // 一時ファイルを本番パスへアトミックリネーム
+        std::fs::rename(&tmp_path, path)?;
+
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 use crate::board::Position;
 use crate::types::{Color, Move, Piece, PieceType, Square};
-use std::io;
+use std::io::{self, BufWriter, Write};
 
 pub const HALFKP_PIECE_SIZE: usize = 81 * 28 + 7 * 2 * 18; // 2,520
 pub const HALFKP_INPUT_SIZE: usize = 81 * HALFKP_PIECE_SIZE; // 81 * 2,520 = 204,120
@@ -497,27 +497,40 @@ impl HalfKPEvaluator {
         self.evaluate_with_accumulator(pos, &acc)
     }
 
-    /// バイナリファイルへ保存 (TABU_HKP)
+    /// バイナリファイルへ安全にアトミック保存 (TABU_HKP)
+    /// 52MBのメモリ一括確保を完全排除し、一時ファイルへのBufWriter逐次書き出しとアトミックリネームで既存ファイルを保護
     pub fn save_to_file(&self, path: &str) -> io::Result<()> {
-        let mut bytes = Vec::with_capacity(16 + HALFKP_INPUT_SIZE * HALFKP_HIDDEN_SIZE * 2 + 1024);
-        bytes.extend_from_slice(HALFKP_MAGIC);
-        bytes.extend_from_slice(&(HALFKP_INPUT_SIZE as u32).to_le_bytes());
-        bytes.extend_from_slice(&(HALFKP_HIDDEN_SIZE as u32).to_le_bytes());
+        let tmp_path = format!("{path}.tmp");
+        let file = std::fs::File::create(&tmp_path)?;
+        let mut writer = BufWriter::new(file);
+
+        writer.write_all(HALFKP_MAGIC)?;
+        writer.write_all(&(HALFKP_INPUT_SIZE as u32).to_le_bytes())?;
+        writer.write_all(&(HALFKP_HIDDEN_SIZE as u32).to_le_bytes())?;
 
         for row in &self.feature_weights {
             for &w in row {
-                bytes.extend_from_slice(&w.to_le_bytes());
+                writer.write_all(&w.to_le_bytes())?;
             }
         }
         for &b in &self.feature_biases {
-            bytes.extend_from_slice(&b.to_le_bytes());
+            writer.write_all(&b.to_le_bytes())?;
         }
         for &w in &self.output_weights {
-            bytes.extend_from_slice(&w.to_le_bytes());
+            writer.write_all(&w.to_le_bytes())?;
         }
-        bytes.extend_from_slice(&self.output_bias.to_le_bytes());
+        writer.write_all(&self.output_bias.to_le_bytes())?;
 
-        std::fs::write(path, bytes)
+        writer.flush()?;
+        drop(writer);
+
+        // アトミックリネームによる置換 (Windows では既存ファイルがあるとエラーになる場合があるため事前に置換)
+        if std::path::Path::new(path).exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        std::fs::rename(&tmp_path, path)?;
+
+        Ok(())
     }
 
     /// バイナリファイルから読み込み

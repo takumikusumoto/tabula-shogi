@@ -47,10 +47,19 @@ fn main() {
     }
 
     match args[1].as_str() {
-        "generate" => run_generate(&args[2..]),
+        "generate" => {
+            if !run_generate(&args[2..]) {
+                std::process::exit(1);
+            }
+        }
         "train" => run_train(&args[2..]),
         "run" => {
-            run_generate(&args[2..]);
+            if !run_generate(&args[2..]) {
+                eprintln!(
+                    "[Error] Pipeline aborted: Self-play generation had failures or anomalies."
+                );
+                std::process::exit(1);
+            }
             run_train(&args[2..]);
         }
         "help" | "-h" | "--help" => print_usage(),
@@ -70,17 +79,19 @@ fn parse_eval_mode(val: &str) -> EvalMode {
         match HalfKPEvaluator::load_from_file(path) {
             Ok(eval) => EvalMode::HalfKP(Arc::new(eval)),
             Err(e) => {
-                eprintln!("Failed to load HalfKP model from '{path}': {e}. Falling back to Hce.");
-                EvalMode::Hce
+                eprintln!(
+                    "[Fatal Error] Failed to load HalfKP model from '{path}': {e}. Aborting."
+                );
+                std::process::exit(1);
             }
         }
     } else {
-        eprintln!("Unknown eval mode '{val}'. Using Hce.");
-        EvalMode::Hce
+        eprintln!("[Fatal Error] Unknown eval mode '{val}'. Aborting.");
+        std::process::exit(1);
     }
 }
 
-fn run_generate(args: &[String]) {
+fn run_generate(args: &[String]) -> bool {
     let mut total_games = 100usize;
     let mut games_per_part = 20usize;
     let mut threads = 4usize;
@@ -148,7 +159,8 @@ fn run_generate(args: &[String]) {
         },
     };
 
-    PartitionedSelfPlayManager::run(config);
+    let stats = PartitionedSelfPlayManager::run(config);
+    stats.is_success()
 }
 
 fn run_train(args: &[String]) {

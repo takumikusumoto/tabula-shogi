@@ -65,6 +65,29 @@ impl HalfKPStreamTrainer {
     pub fn train(config: StreamTrainConfig) -> Result<StreamTrainSummary, String> {
         let overall_start = Instant::now();
 
+        // 0. 入力パラメータの厳格バリデーション (メモリ上限超過および不正値の即座拒否)
+        if config.batch_size == 0 || config.batch_size > 16384 {
+            return Err(format!(
+                "Invalid batch_size: {}. batch_size must be between 1 and 16384 to strictly guarantee the 500MB memory limit.",
+                config.batch_size
+            ));
+        }
+        if config.epochs == 0 {
+            return Err("Invalid epochs: 0. epochs must be at least 1.".to_string());
+        }
+        if config.lr <= 0.0 || !config.lr.is_finite() {
+            return Err(format!(
+                "Invalid learning rate: {}. lr must be positive and finite.",
+                config.lr
+            ));
+        }
+        if config.k <= 0.0 || !config.k.is_finite() {
+            return Err(format!(
+                "Invalid sigmoid sensitivity k: {}. k must be positive and finite.",
+                config.k
+            ));
+        }
+
         // 1. ストリーミングリーダーの初期化
         let mut reader =
             MultiPartitionStreamingReader::from_directory(&config.data_dir, config.batch_size)
@@ -96,12 +119,14 @@ impl HalfKPStreamTrainer {
         println!("Model Output: {}", config.model_output_path);
         println!("========================================================");
 
-        // 2. トレーナーの初期化またはチェックポイントからの復元
+        // 2. トレーナーの初期化またはチェックポイントからのウォームスタート復元
         let mut trainer = if config.resume_from_checkpoint
             && let Some(ref ckpt_path) = config.checkpoint_path
             && Path::new(ckpt_path).exists()
         {
-            println!("[Resume] Loading Adam momentum checkpoint from '{ckpt_path}'...");
+            println!(
+                "[Resume] Warm-starting HalfKPTrainer weights and Adam momentum from '{ckpt_path}'..."
+            );
             HalfKPTrainer::load_checkpoint(ckpt_path)?
         } else {
             println!("[Init] Initializing fresh HalfKPTrainer from initial evaluator weights...");
@@ -226,6 +251,13 @@ impl HalfKPStreamTrainer {
             summary.total_positions_trained += epoch_positions;
             summary.total_batches += epoch_batches;
 
+            if epoch_positions == 0 {
+                eprintln!(
+                    "[Warning] Epoch {epoch} processed 0 valid positions. Skipping model/checkpoint persistence."
+                );
+                continue;
+            }
+
             // 各エポック終了時に推論モデルおよびチェックポイントを永続化
             println!(
                 "[Persist] Exporting inference model to '{}'...",
@@ -245,6 +277,10 @@ impl HalfKPStreamTrainer {
                     format!("Failed to save epoch checkpoint to '{ckpt_path}': {e}")
                 })?;
             }
+        }
+
+        if summary.total_positions_trained == 0 {
+            return Err("Zero valid positions were processed across all epochs. Model and checkpoint were not updated.".to_string());
         }
 
         let overall_duration = overall_start.elapsed().as_secs_f64().max(0.001);

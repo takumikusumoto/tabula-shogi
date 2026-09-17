@@ -56,6 +56,13 @@ pub struct PartitionedSessionStats {
     pub total_duration_secs: f64,
 }
 
+impl PartitionedSessionStats {
+    /// 全パーティションが I/O エラーなく 100% 正常完了したかを判定
+    pub fn is_success(&self) -> bool {
+        self.completed_partitions == self.total_partitions && self.total_io_errors == 0
+    }
+}
+
 /// 大規模自己対局の分割生成マネージャー
 pub struct PartitionedSelfPlayManager;
 
@@ -63,6 +70,11 @@ impl PartitionedSelfPlayManager {
     /// パーティションTSVファイルのパスを生成
     pub fn partition_tsv_path(dir: &str, part_idx: usize) -> PathBuf {
         Path::new(dir).join(format!("part_{part_idx:04}.tsv"))
+    }
+
+    /// パーティション一時生成ファイルのパスを生成 (.tmp.tsv)
+    pub fn partition_tmp_tsv_path(dir: &str, part_idx: usize) -> PathBuf {
+        Path::new(dir).join(format!("part_{part_idx:04}.tmp.tsv"))
     }
 
     /// パーティション完了マーカーファイルのパスを生成
@@ -123,35 +135,8 @@ impl PartitionedSelfPlayManager {
 
         for part_idx in 0..num_parts {
             let tsv_path = Self::partition_tsv_path(&config.output_dir, part_idx);
+            let tmp_tsv_path = Self::partition_tmp_tsv_path(&config.output_dir, part_idx);
             let done_path = Self::partition_done_path(&config.output_dir, part_idx);
-
-            // 既に完了マーカーが存在する場合はスキップ（Resume 機能）
-            if done_path.exists() && tsv_path.exists() {
-                println!(
-                    "[Resume] Partition {:04}/{} already completed. Skipping.",
-                    part_idx + 1,
-                    num_parts
-                );
-                stats.skipped_partitions += 1;
-                stats.completed_partitions += 1;
-                let games_this_part = if part_idx == num_parts - 1 {
-                    let rem = config.total_games % games_per_part;
-                    if rem == 0 { games_per_part } else { rem }
-                } else {
-                    games_per_part
-                };
-                stats.total_games_completed += games_this_part;
-                continue;
-            }
-
-            // 中断・不完全なTSVが存在する場合は再生成のためにクリーンアップ
-            if tsv_path.exists() {
-                println!(
-                    "[Notice] Cleaning incomplete partition file: {:?}",
-                    tsv_path
-                );
-                let _ = fs::remove_file(&tsv_path);
-            }
 
             let start_game_id = part_idx * games_per_part;
             let games_this_part = if part_idx == num_parts - 1 {
@@ -161,10 +146,51 @@ impl PartitionedSelfPlayManager {
                 games_per_part
             };
 
+            let expected_signature = format!(
+                "part={part_idx}\ngames={games_this_part}\nstart_id={start_game_id}\ndepth={}\nseed=0x{:X}\n",
+                config.base_config.depth, config.base_config.seed
+            );
+
+            // 既に完了マーカーが存在し、かつ設定署名が完全一致するか照合（厳格な Resume 機能）
+            if done_path.exists() && tsv_path.exists() {
+                if let Ok(existing_done) = fs::read_to_string(&done_path)
+                    && existing_done.starts_with(&expected_signature)
+                {
+                    println!(
+                        "[Resume] Partition {:04}/{} already completed with matching config. Skipping.",
+                        part_idx + 1,
+                        num_parts
+                    );
+                    stats.skipped_partitions += 1;
+                    stats.completed_partitions += 1;
+                    stats.total_games_completed += games_this_part;
+                    continue;
+                } else {
+                    println!(
+                        "[Notice] Partition {:04} exists but configuration mismatched or marker corrupted. Invalidating and regenerating.",
+                        part_idx + 1
+                    );
+                    let _ = fs::remove_file(&done_path);
+                    let _ = fs::remove_file(&tsv_path);
+                }
+            }
+
+            // 中断・不完全な一時ファイルが存在する場合は再生成のためにクリーンアップ
+            if tmp_tsv_path.exists() {
+                let _ = fs::remove_file(&tmp_tsv_path);
+            }
+            if tsv_path.exists() {
+                let _ = fs::remove_file(&tsv_path);
+            }
+            if done_path.exists() {
+                let _ = fs::remove_file(&done_path);
+            }
+
             let mut part_sp_cfg = config.base_config.clone();
             part_sp_cfg.num_games = games_this_part;
             part_sp_cfg.start_game_id = start_game_id;
-            part_sp_cfg.data_output = Some(tsv_path.to_string_lossy().to_string());
+            // 直接本番パスではなく一時ファイル .tmp.tsv へ出力
+            part_sp_cfg.data_output = Some(tmp_tsv_path.to_string_lossy().to_string());
 
             println!(
                 "\n>>> Starting Partition {:04}/{} (Game IDs: {}..{}) >>>",
@@ -178,14 +204,22 @@ impl PartitionedSelfPlayManager {
             stats.total_io_errors += part_stats.io_errors;
             stats.total_games_completed += part_stats.completed_games;
 
-            // 完了マーカーの作成
+            // 完了マーカーの作成 & アトミック公開
             if part_stats.io_errors == 0 && part_stats.completed_games == games_this_part {
+                // 1. 一時 TSV を本番 TSV へアトミックリネーム
+                if let Err(e) = fs::rename(&tmp_tsv_path, &tsv_path) {
+                    eprintln!(
+                        "[Error] Failed to rename tmp TSV {:?} to {:?}: {e}",
+                        tmp_tsv_path, tsv_path
+                    );
+                    stats.total_io_errors += 1;
+                    continue;
+                }
+
+                // 2. 厳格な設定署名を含む完了マーカーの作成
                 let marker_content = format!(
-                    "partition={}\ngames={}\nplies={}\nio_errors={}\n",
-                    part_idx,
-                    part_stats.completed_games,
-                    part_stats.total_plies,
-                    part_stats.io_errors
+                    "{expected_signature}plies={}\nio_errors={}\n",
+                    part_stats.total_plies, part_stats.io_errors
                 );
                 if let Err(e) = fs::write(&done_path, marker_content) {
                     eprintln!("[Error] Failed to write done marker {:?}: {e}", done_path);
@@ -193,18 +227,19 @@ impl PartitionedSelfPlayManager {
                 } else {
                     stats.completed_partitions += 1;
                     println!(
-                        "[Success] Partition {:04} completed and finalized.",
+                        "[Success] Partition {:04} completed, atomically published, and marked done.",
                         part_idx + 1
                     );
                 }
             } else {
                 eprintln!(
-                    "[Warning] Partition {:04} finished with anomalies (completed {}/{}, io_errors={}). Done marker NOT created.",
+                    "[Warning] Partition {:04} finished with anomalies (completed {}/{}, io_errors={}). tmp TSV discarded.",
                     part_idx + 1,
                     part_stats.completed_games,
                     games_this_part,
                     part_stats.io_errors
                 );
+                let _ = fs::remove_file(&tmp_tsv_path);
             }
         }
 

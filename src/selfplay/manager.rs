@@ -83,7 +83,7 @@ impl SelfPlayManager {
 
         let mut handles = Vec::with_capacity(num_threads);
 
-        for thread_id in 0..num_threads {
+        for _thread_id in 0..num_threads {
             let counter = Arc::clone(&game_counter);
             let stats_lock = Arc::clone(&stats);
             let csa_lock = csa_file.clone();
@@ -100,12 +100,16 @@ impl SelfPlayManager {
                     }
                     let global_game_id = cfg.start_game_id + game_idx;
 
-                    // 対局ごとにユニークなシードを生成（分割パート間・スレッド間で完全一意）
-                    let game_seed = cfg
-                        .seed
-                        .wrapping_add((global_game_id as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
-                        ^ ((thread_id as u64 + 1).wrapping_mul(0x517cc1b727220a95));
-                    let mut game_rng = SimpleRng::new(game_seed);
+                    // 対局ごとに決定論的なユニークシードを生成 (スレッド数・割当てに依存せず global_game_id のみで完全再現)
+                    let id_val = global_game_id as u64 + 1;
+                    let mixed = id_val.wrapping_mul(0x9e3779b97f4a7c15)
+                        ^ (id_val.wrapping_mul(0x517cc1b727220a95) >> 32);
+                    let game_seed = cfg.seed.wrapping_add(mixed);
+                    let mut game_rng = SimpleRng::new(if game_seed == 0 {
+                        0xdeadbeefcafe
+                    } else {
+                        game_seed
+                    });
 
                     let record =
                         GameRunner::play_game(global_game_id + 1, &cfg, &mut engine, &mut game_rng);

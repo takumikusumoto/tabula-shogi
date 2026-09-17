@@ -232,3 +232,123 @@ fn test_halfkp_stream_training_integration() {
     let _ = fs::remove_file(model_path);
     let _ = fs::remove_file(ckpt_path);
 }
+
+#[test]
+fn test_partitioned_selfplay_resume_config_mismatch_invalidation() {
+    let test_dir = "target/test_config_mismatch";
+    let _ = fs::remove_dir_all(test_dir);
+
+    let mut config1 = PartitionConfig {
+        total_games: 2,
+        games_per_partition: 2,
+        output_dir: test_dir.to_string(),
+        base_config: SelfPlayConfig {
+            num_games: 2,
+            threads: 1,
+            depth: 1,
+            random_opening_plies: 2,
+            max_plies: 20,
+            resign_threshold: -1000,
+            csa_output: None,
+            data_output: None,
+            tt_size_mb: 2,
+            seed: 0x11111111,
+            eval_mode: tabula_shogi::eval::EvalMode::Hce,
+            temperature_plies: 4,
+            start_game_id: 0,
+        },
+    };
+
+    let stats1 = PartitionedSelfPlayManager::run(config1.clone());
+    assert_eq!(stats1.completed_partitions, 1);
+    assert_eq!(stats1.skipped_partitions, 0);
+
+    // 異なるシードで同一ディレクトリへ再実行
+    config1.base_config.seed = 0x99999999;
+    let stats2 = PartitionedSelfPlayManager::run(config1);
+    // 設定不一致により古い完了マーカーが無効化され、スキップされずに再生成されることを検証
+    assert_eq!(stats2.completed_partitions, 1);
+    assert_eq!(
+        stats2.skipped_partitions, 0,
+        "Mismatched config must NOT be skipped"
+    );
+
+    let _ = fs::remove_dir_all(test_dir);
+}
+
+#[test]
+fn test_checkpoint_atomic_save_and_backup() {
+    let ckpt_path = "target/test_atomic_ckpt.bin";
+    let bak_path = format!("{ckpt_path}.bak");
+    let tmp_path = format!("{ckpt_path}.tmp");
+
+    let _ = fs::remove_file(ckpt_path);
+    let _ = fs::remove_file(&bak_path);
+    let _ = fs::remove_file(&tmp_path);
+
+    let mut trainer = HalfKPTrainer::new();
+    trainer.output_bias = 111.0;
+
+    // 1回目の保存: 本番ファイルが作成される
+    trainer
+        .save_checkpoint(ckpt_path)
+        .expect("First save failed");
+    assert!(Path::new(ckpt_path).exists());
+    assert!(
+        !Path::new(&tmp_path).exists(),
+        ".tmp must not remain after successful save"
+    );
+
+    // 2回目の保存: 状態を変更して保存
+    trainer.output_bias = 222.0;
+    trainer
+        .save_checkpoint(ckpt_path)
+        .expect("Second save failed");
+
+    // 本番パスには最新世代 (222.0)、.bak には直前世代 (111.0) が存在することを検証
+    assert!(Path::new(ckpt_path).exists());
+    assert!(Path::new(&bak_path).exists(), ".bak backup must exist");
+
+    let loaded_current = HalfKPTrainer::load_checkpoint(ckpt_path).unwrap();
+    assert_eq!(loaded_current.output_bias, 222.0);
+
+    let loaded_bak = HalfKPTrainer::load_checkpoint(&bak_path).unwrap();
+    assert_eq!(loaded_bak.output_bias, 111.0);
+
+    let _ = fs::remove_file(ckpt_path);
+    let _ = fs::remove_file(&bak_path);
+}
+
+#[test]
+fn test_stream_trainer_input_validation_and_empty_guard() {
+    let test_dir = "target/test_validation_dummy";
+    let _ = fs::remove_dir_all(test_dir);
+    fs::create_dir_all(test_dir).unwrap();
+
+    // 1. batch_size = 0 の拒否
+    let cfg_zero_batch = StreamTrainConfig {
+        data_dir: test_dir.to_string(),
+        batch_size: 0,
+        ..Default::default()
+    };
+    assert!(HalfKPStreamTrainer::train(cfg_zero_batch).is_err());
+
+    // 2. batch_size > 16384 (500MB制約保護) の拒否
+    let cfg_huge_batch = StreamTrainConfig {
+        data_dir: test_dir.to_string(),
+        batch_size: 20000,
+        ..Default::default()
+    };
+    assert!(HalfKPStreamTrainer::train(cfg_huge_batch).is_err());
+
+    // 3. 不正学習率の拒否
+    let cfg_bad_lr = StreamTrainConfig {
+        data_dir: test_dir.to_string(),
+        batch_size: 1024,
+        lr: -0.01,
+        ..Default::default()
+    };
+    assert!(HalfKPStreamTrainer::train(cfg_bad_lr).is_err());
+
+    let _ = fs::remove_dir_all(test_dir);
+}
