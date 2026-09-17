@@ -345,49 +345,49 @@ fn run_loop(args: &[String]) {
         config.games_per_iteration = val;
     }
     if let Some(val) = parser.get_value("--eval-pairs", Some("-p")) {
-        config.eval_pairs = val;
+        config.arena.eval_pairs = val;
     }
     if let Some(val) = parser.get_value("--threads", Some("-t")) {
-        config.threads = val;
+        config.arena.threads = val;
     }
     if let Some(val) = parser.get_value("--depth", Some("-d")) {
-        config.depth = val;
+        config.arena.depth = val;
     }
     if let Some(val) = parser.get_value("--epochs", Some("-e")) {
-        config.epochs = val;
+        config.training.epochs = val;
     }
     if let Some(val) = parser.get_value("--lr", None) {
-        config.lr = val;
+        config.training.lr = val;
     }
     if let Some(val) = parser.get_value("--batch-size", Some("-b")) {
-        config.batch_size = val;
+        config.training.batch_size = val;
     }
     if let Some(val) = parser.get_string("--data", None) {
-        config.data_path = val;
+        config.paths.data_path = val;
     }
     if let Some(val) = parser.get_string("--deep-data", None) {
-        config.deep_data_path = val;
+        config.paths.deep_data_path = val;
     }
     if let Some(val) = parser.get_string("--best", None) {
-        config.best_model_path = val;
+        config.paths.best_model_path = val;
     }
     if let Some(val) = parser.get_string("--candidate", None) {
-        config.candidate_model_path = val;
+        config.paths.candidate_model_path = val;
     }
     if let Some(val) = parser.get_string("--candidate-ckpt", None) {
-        config.candidate_ckpt_path = val;
+        config.paths.candidate_ckpt_path = val;
     }
     if let Some(val) = parser.get_value("--min-games", None) {
-        config.min_promotion_games = val;
+        config.arena.min_promotion_games = val;
     }
     if let Some(val) = parser.get_string("--summary", None) {
-        config.summary_path = val;
+        config.paths.summary_path = val;
     }
     if let Some(val) = parser.get_value("--start-iter", None) {
         config.start_iteration = Some(val);
     }
     if let Some(val) = parser.get_string("--state", None) {
-        config.state_path = val;
+        config.paths.state_path = val;
     }
 
     SelfImprovementLoop::run(&config);

@@ -9,7 +9,10 @@ pub mod tune;
 pub mod types;
 pub mod usi;
 
-pub use arena::{LoopConfig, MatchConfig, MatchResult, MatchRunner, SelfImprovementLoop, Sprt};
+pub use arena::{
+    LoopArenaParams, LoopConfig, LoopStoragePaths, LoopTrainingParams, MatchConfig, MatchResult,
+    MatchRunner, SelfImprovementLoop, Sprt,
+};
 pub use board::Position;
 pub use book::OpeningBook;
 pub use eval::Evaluator;

@@ -1,7 +1,8 @@
 use std::fs;
 use std::sync::Arc;
 use tabula_shogi::arena::{
-    LoopConfig, MatchConfig, MatchRunner, SelfImprovementLoop, Sprt, SprtConfig, SprtStatus,
+    LoopArenaParams, LoopConfig, LoopStoragePaths, LoopTrainingParams, MatchConfig, MatchRunner,
+    SelfImprovementLoop, Sprt, SprtConfig, SprtStatus,
 };
 use tabula_shogi::eval::{EvalMode, NNUEEvaluator};
 
@@ -123,21 +124,27 @@ fn test_autonomous_loop_single_iteration() {
     let config = LoopConfig {
         iterations: 1,
         start_iteration: Some(1),
-        state_path: state_path.clone(),
         games_per_iteration: 4,
-        eval_pairs: 2,
-        threads: 2,
-        depth: 1,
-        epochs: 2,
-        lr: 0.01,
-        batch_size: 16,
-        data_path: data_path.clone(),
-        deep_data_path: deep_data_path.clone(),
-        best_model_path: best_path.clone(),
-        candidate_model_path: cand_path.clone(),
-        candidate_ckpt_path: cand_ckpt_path.clone(),
-        min_promotion_games: 20,
-        summary_path: summary_path.clone(),
+        arena: LoopArenaParams {
+            eval_pairs: 2,
+            threads: 2,
+            depth: 1,
+            min_promotion_games: 20,
+        },
+        training: LoopTrainingParams {
+            epochs: 2,
+            lr: 0.01,
+            batch_size: 16,
+        },
+        paths: LoopStoragePaths {
+            state_path: state_path.clone(),
+            data_path: data_path.clone(),
+            deep_data_path: deep_data_path.clone(),
+            best_model_path: best_path.clone(),
+            candidate_model_path: cand_path.clone(),
+            candidate_ckpt_path: cand_ckpt_path.clone(),
+            summary_path: summary_path.clone(),
+        },
     };
 
     SelfImprovementLoop::run(&config);

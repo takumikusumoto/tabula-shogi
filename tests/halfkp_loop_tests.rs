@@ -1,5 +1,8 @@
 use std::fs;
-use tabula_shogi::arena::{LoopConfig, MatchResult, SelfImprovementLoop, SprtStatus};
+use tabula_shogi::arena::{
+    LoopArenaParams, LoopConfig, LoopStoragePaths, LoopTrainingParams, MatchResult,
+    SelfImprovementLoop, SprtStatus,
+};
 use tabula_shogi::eval::EvalMode;
 use tabula_shogi::eval::halfkp::HalfKPEvaluator;
 use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
@@ -66,21 +69,27 @@ fn test_halfkp_autonomous_loop_single_iteration() {
     let config = LoopConfig {
         iterations: 1,
         start_iteration: Some(1),
-        state_path: state_path.clone(),
         games_per_iteration: 4,
-        eval_pairs: 2,
-        threads: 2,
-        depth: 1,
-        epochs: 2,
-        lr: 0.001,
-        batch_size: 16,
-        data_path: data_path.clone(),
-        deep_data_path: deep_data_path.clone(),
-        best_model_path: best_path.clone(),
-        candidate_model_path: cand_path.clone(),
-        candidate_ckpt_path: cand_ckpt_path.clone(),
-        min_promotion_games: 20,
-        summary_path: summary_path.clone(),
+        arena: LoopArenaParams {
+            eval_pairs: 2,
+            threads: 2,
+            depth: 1,
+            min_promotion_games: 20,
+        },
+        training: LoopTrainingParams {
+            epochs: 2,
+            lr: 0.001,
+            batch_size: 16,
+        },
+        paths: LoopStoragePaths {
+            state_path: state_path.clone(),
+            data_path: data_path.clone(),
+            deep_data_path: deep_data_path.clone(),
+            best_model_path: best_path.clone(),
+            candidate_model_path: cand_path.clone(),
+            candidate_ckpt_path: cand_ckpt_path.clone(),
+            summary_path: summary_path.clone(),
+        },
     };
 
     SelfImprovementLoop::run(&config);
@@ -202,21 +211,27 @@ fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
     let config = LoopConfig {
         iterations: 1,
         start_iteration: Some(2),
-        state_path: state_path.clone(),
         games_per_iteration: 4,
-        eval_pairs: 2,
-        threads: 2,
-        depth: 1,
-        epochs: 1,
-        lr: 0.001,
-        batch_size: 16,
-        data_path: data_path.clone(),
-        deep_data_path: deep_data_path.clone(),
-        best_model_path: best_path.clone(),
-        candidate_model_path: cand_path.clone(),
-        candidate_ckpt_path: cand_ckpt_path.clone(),
-        min_promotion_games: 20,
-        summary_path: summary_path.clone(),
+        arena: LoopArenaParams {
+            eval_pairs: 2,
+            threads: 2,
+            depth: 1,
+            min_promotion_games: 20,
+        },
+        training: LoopTrainingParams {
+            epochs: 1,
+            lr: 0.001,
+            batch_size: 16,
+        },
+        paths: LoopStoragePaths {
+            state_path: state_path.clone(),
+            data_path: data_path.clone(),
+            deep_data_path: deep_data_path.clone(),
+            best_model_path: best_path.clone(),
+            candidate_model_path: cand_path.clone(),
+            candidate_ckpt_path: cand_ckpt_path.clone(),
+            summary_path: summary_path.clone(),
+        },
     };
 
     SelfImprovementLoop::run(&config);

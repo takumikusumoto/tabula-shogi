@@ -20,24 +20,79 @@ pub const DISTILLATION_RESULT_WEIGHT: f32 = 0.2;
 /// シグモイド勝率変換のデフォルト感度係数 (600 cp で勝率 ~73%)
 pub const DEFAULT_SIGMOID_K: f32 = 600.0;
 
-pub struct LoopConfig {
-    pub iterations: usize,
-    pub start_iteration: Option<usize>,
-    pub state_path: String,
-    pub games_per_iteration: usize,
+/// 自己対局・アリーナ対戦パラメータ
+#[derive(Clone, Debug)]
+pub struct LoopArenaParams {
     pub eval_pairs: usize,
     pub threads: usize,
     pub depth: u8,
+    pub min_promotion_games: usize,
+}
+
+impl Default for LoopArenaParams {
+    fn default() -> Self {
+        Self {
+            eval_pairs: 15,
+            threads: 2,
+            depth: 2,
+            min_promotion_games: 20,
+        }
+    }
+}
+
+/// Candidate 学習ハイパーパラメータ
+#[derive(Clone, Debug)]
+pub struct LoopTrainingParams {
     pub epochs: usize,
     pub lr: f32,
     pub batch_size: usize,
+}
+
+impl Default for LoopTrainingParams {
+    fn default() -> Self {
+        Self {
+            epochs: 3,
+            lr: 0.001,
+            batch_size: 1024,
+        }
+    }
+}
+
+/// データセット・モデル永続化パス設定
+#[derive(Clone, Debug)]
+pub struct LoopStoragePaths {
+    pub state_path: String,
     pub data_path: String,
     pub deep_data_path: String,
     pub best_model_path: String,
     pub candidate_model_path: String,
     pub candidate_ckpt_path: String,
-    pub min_promotion_games: usize,
     pub summary_path: String,
+}
+
+impl Default for LoopStoragePaths {
+    fn default() -> Self {
+        Self {
+            state_path: "loop_state.txt".to_string(),
+            data_path: "loop_dataset.tsv".to_string(),
+            deep_data_path: "deep_dataset.tsv".to_string(),
+            best_model_path: "models/best_halfkp.bin".to_string(),
+            candidate_model_path: "models/candidate_halfkp.bin".to_string(),
+            candidate_ckpt_path: "models/candidate_halfkp_ckpt.bin".to_string(),
+            summary_path: "loop_summary.csv".to_string(),
+        }
+    }
+}
+
+/// 自律的自己改善ループ全体設定
+#[derive(Clone, Debug)]
+pub struct LoopConfig {
+    pub iterations: usize,
+    pub start_iteration: Option<usize>,
+    pub games_per_iteration: usize,
+    pub arena: LoopArenaParams,
+    pub training: LoopTrainingParams,
+    pub paths: LoopStoragePaths,
 }
 
 impl Default for LoopConfig {
@@ -45,21 +100,10 @@ impl Default for LoopConfig {
         Self {
             iterations: 3,
             start_iteration: None,
-            state_path: "loop_state.txt".to_string(),
             games_per_iteration: 120,
-            eval_pairs: 15,
-            threads: 2,
-            depth: 2,
-            epochs: 3,
-            lr: 0.001,
-            batch_size: 1024,
-            data_path: "loop_dataset.tsv".to_string(),
-            deep_data_path: "deep_dataset.tsv".to_string(),
-            best_model_path: "models/best_halfkp.bin".to_string(),
-            candidate_model_path: "models/candidate_halfkp.bin".to_string(),
-            candidate_ckpt_path: "models/candidate_halfkp_ckpt.bin".to_string(),
-            min_promotion_games: 20,
-            summary_path: "loop_summary.csv".to_string(),
+            arena: LoopArenaParams::default(),
+            training: LoopTrainingParams::default(),
+            paths: LoopStoragePaths::default(),
         }
     }
 }
@@ -85,35 +129,39 @@ impl SelfImprovementLoop {
             "Iterations: {}, Games/Iter: {}, EvalPairs: {} ({} games)",
             config.iterations,
             config.games_per_iteration,
-            config.eval_pairs,
-            config.eval_pairs * 2
+            config.arena.eval_pairs,
+            config.arena.eval_pairs * 2
         );
         println!(
             "Threads: {}, Depth: {}, Epochs: {}, LR: {}, BatchSize: {}",
-            config.threads, config.depth, config.epochs, config.lr, config.batch_size
+            config.arena.threads,
+            config.arena.depth,
+            config.training.epochs,
+            config.training.lr,
+            config.training.batch_size
         );
-        println!("Dataset: {}", config.data_path);
-        println!("Best Model: {}", config.best_model_path);
-        println!("Candidate Model: {}", config.candidate_model_path);
-        println!("Candidate Ckpt: {}", config.candidate_ckpt_path);
-        println!("Min Promotion Games: {}", config.min_promotion_games);
-        println!("Summary Log: {}", config.summary_path);
+        println!("Dataset: {}", config.paths.data_path);
+        println!("Best Model: {}", config.paths.best_model_path);
+        println!("Candidate Model: {}", config.paths.candidate_model_path);
+        println!("Candidate Ckpt: {}", config.paths.candidate_ckpt_path);
+        println!("Min Promotion Games: {}", config.arena.min_promotion_games);
+        println!("Summary Log: {}", config.paths.summary_path);
         println!("============================================================");
 
         // 初期モデルの確認 (HalfKPモデルが存在するか)
-        let mut current_best_eval = if Path::new(&config.best_model_path).exists() {
-            match HalfKPEvaluator::load_from_file(&config.best_model_path) {
+        let mut current_best_eval = if Path::new(&config.paths.best_model_path).exists() {
+            match HalfKPEvaluator::load_from_file(&config.paths.best_model_path) {
                 Ok(eval) => {
                     println!(
                         "Loaded initial best HalfKP model from '{}'",
-                        config.best_model_path
+                        config.paths.best_model_path
                     );
                     EvalMode::HalfKP(Arc::new(eval))
                 }
                 Err(e) => {
                     println!(
                         "Failed to load '{}' ({e}), using HCE as base",
-                        config.best_model_path
+                        config.paths.best_model_path
                     );
                     EvalMode::Hce
                 }
@@ -126,8 +174,8 @@ impl SelfImprovementLoop {
         let start_gen = match config.start_iteration {
             Some(s) => s,
             None => {
-                if Path::new(&config.state_path).exists() {
-                    std::fs::read_to_string(&config.state_path)
+                if Path::new(&config.paths.state_path).exists() {
+                    std::fs::read_to_string(&config.paths.state_path)
                         .ok()
                         .and_then(|s| s.trim().parse::<usize>().ok())
                         .map(|last| last + 1)
@@ -153,30 +201,46 @@ impl SelfImprovementLoop {
             // Step 1: 自己対局データ生成
             let gen_seed = 0x9E3779B97F4A7C15u64
                 .wrapping_add((cur_gen as u64).wrapping_mul(0x517cc1b727220a95));
-            Self::generate_selfplay_data(config, &current_best_eval, cur_gen, gen_seed);
+            Self::generate_selfplay_data(
+                config.games_per_iteration,
+                &config.arena,
+                &config.paths,
+                &current_best_eval,
+                cur_gen,
+                gen_seed,
+            );
 
             // Step 2: データセット準備 & IIZ 深読み再評価
-            let (mut dataset, successful_relabelled_count) =
-                match Self::prepare_training_dataset(config, gen_seed, &current_best_eval) {
-                    Some(res) => res,
-                    None => {
-                        println!("Warning: No dataset found or empty, skipping iteration.");
-                        continue;
-                    }
-                };
+            let (mut dataset, successful_relabelled_count) = match Self::prepare_training_dataset(
+                &config.paths,
+                &config.arena,
+                gen_seed,
+                &current_best_eval,
+            ) {
+                Some(res) => res,
+                None => {
+                    println!("Warning: No dataset found or empty, skipping iteration.");
+                    continue;
+                }
+            };
 
             // Step 3: Candidate 学習 & メモリ即時解放
             let (candidate_eval, init_mse, final_mse, loss_reduction) =
                 Self::train_candidate_generation(
-                    config,
+                    &config.training,
+                    &config.paths,
                     gen_seed,
                     &mut dataset,
                     &current_best_eval,
                 );
 
             // Step 4: アリーナ対戦 & SPRT 検定
-            let match_res =
-                Self::run_arena_and_sprt(config, cur_gen, &candidate_eval, &current_best_eval);
+            let match_res = Self::run_arena_and_sprt(
+                &config.arena,
+                cur_gen,
+                &candidate_eval,
+                &current_best_eval,
+            );
 
             // Step 5: 厳格な昇格判定
             let promoted = Self::handle_promotion(
@@ -184,8 +248,8 @@ impl SelfImprovementLoop {
                 &match_res,
                 &candidate_eval,
                 &mut current_best_eval,
-                &config.best_model_path,
-                config.min_promotion_games,
+                &config.paths.best_model_path,
+                config.arena.min_promotion_games,
             );
 
             // Step 6: サマリ記録 & 世代更新
@@ -197,7 +261,7 @@ impl SelfImprovementLoop {
                 loss_reduction,
             };
             Self::record_generation_summary(
-                config,
+                &config.paths,
                 cur_gen,
                 &current_best_eval,
                 gen_start_instant,
@@ -209,19 +273,21 @@ impl SelfImprovementLoop {
 
         println!("\n============================================================");
         println!("Autonomous Self-Improvement Session Completed!");
-        println!("Best model preserved at: {}", config.best_model_path);
+        println!("Best model preserved at: {}", config.paths.best_model_path);
         println!("============================================================");
     }
 
     /// Step 1: 自己対局データ生成 (Policy Mismatch / OOD 解消のため Champion 50% / Candidate 50% 混合)
     fn generate_selfplay_data(
-        config: &LoopConfig,
+        games_per_iteration: usize,
+        arena: &LoopArenaParams,
+        paths: &LoopStoragePaths,
         current_best_eval: &EvalMode,
         cur_gen: usize,
         gen_seed: u64,
     ) {
-        let half_games = config.games_per_iteration / 2;
-        let champ_games = config.games_per_iteration - half_games;
+        let half_games = games_per_iteration / 2;
+        let champ_games = games_per_iteration - half_games;
 
         println!(
             "\n--- Step 1: Self-Play Data Generation (Gen {cur_gen}: {} Champion games + {} Candidate exploration games) ---",
@@ -231,9 +297,9 @@ impl SelfImprovementLoop {
         // 王者による自己対局
         let sp_cfg_champ = SelfPlayConfig {
             num_games: champ_games,
-            threads: config.threads,
-            depth: config.depth,
-            data_output: Some(config.data_path.clone()),
+            threads: arena.threads,
+            depth: arena.depth,
+            data_output: Some(paths.data_path.clone()),
             eval_mode: current_best_eval.clone(),
             seed: gen_seed,
             ..Default::default()
@@ -241,8 +307,8 @@ impl SelfImprovementLoop {
         SelfPlayManager::run(sp_cfg_champ);
 
         // 候補モデル（Candidate HalfKP）による探査自己対局（存在する場合）
-        let candidate_eval_opt = if Path::new(&config.candidate_model_path).exists() {
-            HalfKPEvaluator::load_from_file(&config.candidate_model_path).ok()
+        let candidate_eval_opt = if Path::new(&paths.candidate_model_path).exists() {
+            HalfKPEvaluator::load_from_file(&paths.candidate_model_path).ok()
         } else {
             None
         };
@@ -250,9 +316,9 @@ impl SelfImprovementLoop {
         if let Some(cand_eval) = candidate_eval_opt {
             let sp_cfg_cand = SelfPlayConfig {
                 num_games: half_games,
-                threads: config.threads,
-                depth: config.depth,
-                data_output: Some(config.data_path.clone()),
+                threads: arena.threads,
+                depth: arena.depth,
+                data_output: Some(paths.data_path.clone()),
                 eval_mode: EvalMode::HalfKP(Arc::new(cand_eval)),
                 seed: gen_seed.wrapping_add(0x85ebca6b),
                 start_game_id: champ_games,
@@ -263,9 +329,9 @@ impl SelfImprovementLoop {
             // 初回等でCandidateが存在しない場合はChampionで全数補完
             let sp_cfg_fallback = SelfPlayConfig {
                 num_games: half_games,
-                threads: config.threads,
-                depth: config.depth,
-                data_output: Some(config.data_path.clone()),
+                threads: arena.threads,
+                depth: arena.depth,
+                data_output: Some(paths.data_path.clone()),
                 eval_mode: current_best_eval.clone(),
                 seed: gen_seed.wrapping_add(0x85ebca6b),
                 start_game_id: champ_games,
@@ -277,7 +343,8 @@ impl SelfImprovementLoop {
 
     /// Step 2: データセットサンプリング読込 & IIZ 深読み再評価 (知識蒸留)
     fn prepare_training_dataset(
-        config: &LoopConfig,
+        paths: &LoopStoragePaths,
+        arena: &LoopArenaParams,
         gen_seed: u64,
         current_best_eval: &EvalMode,
     ) -> Option<(Vec<DatasetEntry>, usize)> {
@@ -285,8 +352,8 @@ impl SelfImprovementLoop {
             "\n--- Step 2: Training Candidate Model from Dataset (IIZ Distillation + HalfKP AdamW) ---"
         );
         let mut dataset = match DatasetHandler::load_sampled_with_deep_pool(
-            &config.data_path,
-            Some(&config.deep_data_path),
+            &paths.data_path,
+            Some(&paths.deep_data_path),
             MAX_DATASET_SAMPLE_LIMIT,
             0.5,
             0.5,
@@ -298,13 +365,13 @@ impl SelfImprovementLoop {
 
         // やねうら王流 IIZ (多重反復雑巾絞り): 最新サンプリング局面を Depth+2 で深読み再評価
         let relabel_count = MAX_IIZ_RELABEL_PER_GEN.min(dataset.len());
-        let relabel_depth = config.depth.saturating_add(2);
+        let relabel_depth = arena.depth.saturating_add(2);
         let t_relabel = std::time::Instant::now();
         let successful_relabelled = DatasetHandler::relabel_deep(
             &mut dataset,
             relabel_count,
             relabel_depth,
-            config.threads,
+            arena.threads,
             current_best_eval,
         );
         println!(
@@ -318,7 +385,7 @@ impl SelfImprovementLoop {
         // 探索が正常完了した真の深読み教師局面のみを永続プールファイルに追記
         if !successful_relabelled.is_empty()
             && let Err(e) =
-                DatasetHandler::append_to_file(&config.deep_data_path, &successful_relabelled)
+                DatasetHandler::append_to_file(&paths.deep_data_path, &successful_relabelled)
         {
             eprintln!("Warning: Failed to persist deep relabeled pool: {e}");
         }
@@ -329,7 +396,8 @@ impl SelfImprovementLoop {
 
     /// Step 3: Candidate 学習 & メモリ即時解放
     fn train_candidate_generation(
-        config: &LoopConfig,
+        training: &LoopTrainingParams,
+        paths: &LoopStoragePaths,
         gen_seed: u64,
         dataset: &mut [DatasetEntry],
         current_best_eval: &EvalMode,
@@ -337,23 +405,23 @@ impl SelfImprovementLoop {
         println!(
             "Sampled {} training positions (50% recent / 50% history). Training HalfKP for {} epochs (batch_size: {})...",
             dataset.len(),
-            config.epochs,
-            config.batch_size
+            training.epochs,
+            training.batch_size
         );
 
-        let mut trainer = if Path::new(&config.candidate_ckpt_path).exists() {
-            match HalfKPTrainer::load_checkpoint(&config.candidate_ckpt_path) {
+        let mut trainer = if Path::new(&paths.candidate_ckpt_path).exists() {
+            match HalfKPTrainer::load_checkpoint(&paths.candidate_ckpt_path) {
                 Ok(t) => {
                     println!(
                         "[Resume] Loaded candidate AdamW checkpoint from '{}'",
-                        config.candidate_ckpt_path
+                        paths.candidate_ckpt_path
                     );
                     t
                 }
                 Err(e) => {
                     println!(
                         "Failed to load candidate checkpoint '{}' ({e}), initializing from champion",
-                        config.candidate_ckpt_path
+                        paths.candidate_ckpt_path
                     );
                     match current_best_eval {
                         EvalMode::HalfKP(best) => HalfKPTrainer::from_evaluator(best),
@@ -380,22 +448,22 @@ impl SelfImprovementLoop {
         let mut is_first_batch = true;
         let k_scale = DEFAULT_SIGMOID_K;
 
-        if let Some(parent) = Path::new(&config.candidate_model_path).parent() {
+        if let Some(parent) = Path::new(&paths.candidate_model_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Some(parent) = Path::new(&config.candidate_ckpt_path).parent() {
+        if let Some(parent) = Path::new(&paths.candidate_ckpt_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
         let mut rng_seed = gen_seed.wrapping_add(0xdeadbeef);
 
-        for epoch in 1..=config.epochs {
+        for epoch in 1..=training.epochs {
             println!(
                 "  [Epoch {}/{}] Training {} positions (batch_size: {})...",
                 epoch,
-                config.epochs,
+                training.epochs,
                 dataset.len(),
-                config.batch_size
+                training.batch_size
             );
             // 各エポックでインプレースシャッフル
             if dataset.len() > 1 {
@@ -407,7 +475,7 @@ impl SelfImprovementLoop {
                 }
             }
 
-            for chunk in dataset.chunks(config.batch_size) {
+            for chunk in dataset.chunks(training.batch_size) {
                 let mut batch_samples: Vec<(Vec<usize>, Vec<usize>, f32)> =
                     Vec::with_capacity(chunk.len());
 
@@ -429,7 +497,7 @@ impl SelfImprovementLoop {
                 }
 
                 if !batch_samples.is_empty() {
-                    let loss = trainer.train_batch(&batch_samples, config.lr, k_scale);
+                    let loss = trainer.train_batch(&batch_samples, training.lr, k_scale);
                     if is_first_batch {
                         init_loss = loss;
                         is_first_batch = false;
@@ -454,11 +522,11 @@ impl SelfImprovementLoop {
         );
 
         let cand_eval = trainer.to_evaluator();
-        if let Err(e) = cand_eval.save_to_file(&config.candidate_model_path) {
+        if let Err(e) = cand_eval.save_to_file(&paths.candidate_model_path) {
             eprintln!("Error saving candidate model: {e}");
         }
 
-        if let Err(e) = trainer.save_checkpoint(&config.candidate_ckpt_path) {
+        if let Err(e) = trainer.save_checkpoint(&paths.candidate_ckpt_path) {
             eprintln!("Error saving candidate checkpoint: {e}");
         }
 
@@ -475,21 +543,21 @@ impl SelfImprovementLoop {
 
     /// Step 4: アリーナ対戦 & SPRT 検定 (動的延長対局)
     fn run_arena_and_sprt(
-        config: &LoopConfig,
+        arena: &LoopArenaParams,
         cur_gen: usize,
         candidate_eval: &HalfKPEvaluator,
         current_best_eval: &EvalMode,
     ) -> MatchResult {
         println!("\n--- Step 3: Arena Match & SPRT Testing (Peak Memory < 200MB) ---");
-        let mut current_pairs = config.eval_pairs;
+        let mut current_pairs = arena.eval_pairs;
         let match_cfg = MatchConfig {
             name_a: format!("Candidate_Gen{cur_gen}"),
             name_b: "Best_Model".to_string(),
             eval_a: EvalMode::HalfKP(Arc::new(candidate_eval.clone())),
             eval_b: current_best_eval.clone(),
             pairs: current_pairs,
-            depth: config.depth,
-            threads: config.threads,
+            depth: arena.depth,
+            threads: arena.threads,
             random_opening: 6,
             max_plies: 320,
             tt_size_mb: 16,
@@ -504,13 +572,13 @@ impl SelfImprovementLoop {
         let mut match_res = MatchRunner::run_match(&match_cfg);
 
         // SPRT判定が Continue かつ勝ち越し傾向 (勝率52%以上) の場合、動的に延長対局
-        let max_pairs = config.eval_pairs * 3;
+        let max_pairs = arena.eval_pairs * 3;
         while let Some(ref sprt) = match_res.sprt {
             if sprt.status == SprtStatus::Continue
                 && match_res.win_rate_a >= 0.52
                 && current_pairs < max_pairs
             {
-                current_pairs += config.eval_pairs;
+                current_pairs += arena.eval_pairs;
                 println!(
                     "\n[SPRT Overtime] Indecisive Continue with positive win rate {:.1}% (LLR: {:.2}). Incrementally extending to {} pairs...",
                     match_res.win_rate_a * 100.0,
@@ -528,7 +596,7 @@ impl SelfImprovementLoop {
 
     /// Step 6: サマリ記録 & 世代更新 (CSV追記・状態永続化・クリーンアップ)
     fn record_generation_summary(
-        config: &LoopConfig,
+        paths: &LoopStoragePaths,
         cur_gen: usize,
         current_best_eval: &EvalMode,
         gen_start_instant: std::time::Instant,
@@ -549,7 +617,7 @@ impl SelfImprovementLoop {
         let gen_duration = gen_start_instant.elapsed().as_secs_f64();
 
         Self::append_summary_csv(
-            &config.summary_path,
+            &paths.summary_path,
             cur_gen,
             champ_name,
             gen_duration,
@@ -566,7 +634,7 @@ impl SelfImprovementLoop {
         );
 
         // 世代番号を永続化（次回再起動時に自動で直前世代から継続可能）
-        if let Err(e) = std::fs::write(&config.state_path, cur_gen.to_string()) {
+        if let Err(e) = std::fs::write(&paths.state_path, cur_gen.to_string()) {
             eprintln!("Warning: Failed to persist generation state: {e}");
         }
 
@@ -575,9 +643,9 @@ impl SelfImprovementLoop {
                 "[Progression] Gen {cur_gen} Candidate successfully promoted! Fresh cycle will warm-start from new champion."
             );
             // 昇格時は Candidate チェックポイントを整理し、次代は新王者からウォームスタート
-            if Path::new(&config.candidate_ckpt_path).exists() {
-                let _ = std::fs::remove_file(&config.candidate_ckpt_path);
-                let bak_path = format!("{}.bak", config.candidate_ckpt_path);
+            if Path::new(&paths.candidate_ckpt_path).exists() {
+                let _ = std::fs::remove_file(&paths.candidate_ckpt_path);
+                let bak_path = format!("{}.bak", paths.candidate_ckpt_path);
                 let _ = std::fs::remove_file(&bak_path);
             }
         } else {
