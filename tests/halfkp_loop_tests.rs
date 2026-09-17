@@ -1,3 +1,5 @@
+mod common;
+use common::TestTempDir;
 use std::fs;
 use tabula_shogi::arena::{
     LoopArenaParams, LoopConfig, LoopStoragePaths, LoopTrainingParams, MatchResult,
@@ -9,62 +11,14 @@ use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
 
 #[test]
 fn test_halfkp_autonomous_loop_single_iteration() {
-    let temp_dir = std::env::temp_dir();
-    let prefix = format!(
-        "hkp_loop_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let data_path = temp_dir
-        .join(format!("{prefix}_data.tsv"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let deep_data_path = temp_dir
-        .join(format!("{prefix}_deep.tsv"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let best_path = temp_dir
-        .join(format!("{prefix}_best.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cand_path = temp_dir
-        .join(format!("{prefix}_cand.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cand_ckpt_path = temp_dir
-        .join(format!("{prefix}_cand_ckpt.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let state_path = temp_dir
-        .join(format!("{prefix}_state.txt"))
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let summary_path = temp_dir
-        .join(format!("{prefix}_summary.csv"))
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let clean_files = || {
-        let _ = fs::remove_file(&data_path);
-        let _ = fs::remove_file(&deep_data_path);
-        let _ = fs::remove_file(&best_path);
-        let _ = fs::remove_file(&cand_path);
-        let _ = fs::remove_file(&cand_ckpt_path);
-        let _ = fs::remove_file(format!("{cand_ckpt_path}.bak"));
-        let _ = fs::remove_file(&state_path);
-        let _ = fs::remove_file(&summary_path);
-    };
-    clean_files();
+    let ws = TestTempDir::new("hkp_loop_test");
+    let data_path = ws.file_path("data.tsv");
+    let deep_data_path = ws.file_path("deep.tsv");
+    let best_path = ws.file_path("best.bin");
+    let cand_path = ws.file_path("cand.bin");
+    let cand_ckpt_path = ws.file_path("cand_ckpt.bin");
+    let state_path = ws.file_path("state.txt");
+    let summary_path = ws.file_path("summary.csv");
 
     let config = LoopConfig {
         iterations: 1,
@@ -135,67 +89,18 @@ fn test_halfkp_autonomous_loop_single_iteration() {
     let summary_content = fs::read_to_string(&summary_path).unwrap();
     assert!(summary_content.contains("generation,timestamp,champion_mode"));
     assert!(summary_content.lines().count() >= 2);
-
-    clean_files();
 }
 
 #[test]
 fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
-    let temp_dir = std::env::temp_dir();
-    let prefix = format!(
-        "hkp_cont_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let data_path = temp_dir
-        .join(format!("{prefix}_data.tsv"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let deep_data_path = temp_dir
-        .join(format!("{prefix}_deep.tsv"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let best_path = temp_dir
-        .join(format!("{prefix}_best.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cand_path = temp_dir
-        .join(format!("{prefix}_cand.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cand_ckpt_path = temp_dir
-        .join(format!("{prefix}_cand_ckpt.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let state_path = temp_dir
-        .join(format!("{prefix}_state.txt"))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let summary_path = temp_dir
-        .join(format!("{prefix}_summary.csv"))
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let clean_files = || {
-        let _ = fs::remove_file(&data_path);
-        let _ = fs::remove_file(&deep_data_path);
-        let _ = fs::remove_file(&best_path);
-        let _ = fs::remove_file(&cand_path);
-        let _ = fs::remove_file(&cand_ckpt_path);
-        let _ = fs::remove_file(format!("{cand_ckpt_path}.bak"));
-        let _ = fs::remove_file(&state_path);
-        let _ = fs::remove_file(&summary_path);
-    };
-    clean_files();
+    let ws = TestTempDir::new("hkp_cont_test");
+    let data_path = ws.file_path("data.tsv");
+    let deep_data_path = ws.file_path("deep.tsv");
+    let best_path = ws.file_path("best.bin");
+    let cand_path = ws.file_path("cand.bin");
+    let cand_ckpt_path = ws.file_path("cand_ckpt.bin");
+    let state_path = ws.file_path("state.txt");
+    let summary_path = ws.file_path("summary.csv");
 
     // 事前にダミーの AdamW チェックポイントを作成 (特定の特徴量の step_feat を 5 に設定)
     {
@@ -248,30 +153,12 @@ fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
     // 世代番号が 2 に更新されていることを確認
     let saved_gen = fs::read_to_string(&state_path).unwrap();
     assert_eq!(saved_gen.trim(), "2");
-
-    clean_files();
 }
 
 #[test]
 fn test_halfkp_loop_promotion_gate_blocks_small_samples() {
-    let temp_dir = std::env::temp_dir();
-    let prefix = format!(
-        "hkp_gate_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let best_path = temp_dir
-        .join(format!("{prefix}_best.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let clean_files = || {
-        let _ = fs::remove_file(&best_path);
-    };
-    clean_files();
+    let ws = TestTempDir::new("hkp_gate_test");
+    let best_path = ws.file_path("best.bin");
 
     let candidate_eval = HalfKPEvaluator::new();
     let mut current_best = EvalMode::Hce;
@@ -312,30 +199,12 @@ fn test_halfkp_loop_promotion_gate_blocks_small_samples() {
         !std::path::Path::new(&best_path).exists(),
         "Best model file must not be created"
     );
-
-    clean_files();
 }
 
 #[test]
 fn test_halfkp_loop_promotion_gate_permits_when_threshold_met() {
-    let temp_dir = std::env::temp_dir();
-    let prefix = format!(
-        "hkp_gate_pass_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let best_path = temp_dir
-        .join(format!("{prefix}_best.bin"))
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let clean_files = || {
-        let _ = fs::remove_file(&best_path);
-    };
-    clean_files();
+    let ws = TestTempDir::new("hkp_gate_pass");
+    let best_path = ws.file_path("best.bin");
 
     let candidate_eval = HalfKPEvaluator::new();
     let mut current_best = EvalMode::Hce;
@@ -381,8 +250,6 @@ fn test_halfkp_loop_promotion_gate_permits_when_threshold_met() {
     // 保存されたモデルがロード可能であることを検証
     let loaded = HalfKPEvaluator::load_from_file(&best_path);
     assert!(loaded.is_ok(), "Promoted model must be valid HalfKP binary");
-
-    clean_files();
 }
 
 #[test]

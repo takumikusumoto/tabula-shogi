@@ -1,3 +1,5 @@
+mod common;
+use common::TestTempDir;
 use std::fs;
 use std::sync::Arc;
 use tabula_shogi::arena::{
@@ -75,51 +77,14 @@ fn test_arena_pair_match() {
 
 #[test]
 fn test_autonomous_loop_single_iteration() {
-    let temp_dir = std::env::temp_dir();
-    let data_path = temp_dir
-        .join("test_loop_data.tsv")
-        .to_str()
-        .unwrap()
-        .to_string();
-    let best_path = temp_dir
-        .join("test_loop_best.bin")
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cand_path = temp_dir
-        .join("test_loop_cand.bin")
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cand_ckpt_path = temp_dir
-        .join("test_loop_cand_ckpt.bin")
-        .to_str()
-        .unwrap()
-        .to_string();
-    let summary_path = temp_dir
-        .join("test_loop_summary.csv")
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let state_path = temp_dir
-        .join("test_loop_state.txt")
-        .to_str()
-        .unwrap()
-        .to_string();
-    let deep_data_path = temp_dir
-        .join("test_deep_dataset.tsv")
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let _ = fs::remove_file(&data_path);
-    let _ = fs::remove_file(&deep_data_path);
-    let _ = fs::remove_file(&best_path);
-    let _ = fs::remove_file(&cand_path);
-    let _ = fs::remove_file(&cand_ckpt_path);
-    let _ = fs::remove_file(&state_path);
-    let _ = fs::remove_file(&summary_path);
+    let ws = TestTempDir::new("phase5_loop_test");
+    let data_path = ws.file_path("test_loop_data.tsv");
+    let best_path = ws.file_path("test_loop_best.bin");
+    let cand_path = ws.file_path("test_loop_cand.bin");
+    let cand_ckpt_path = ws.file_path("test_loop_cand_ckpt.bin");
+    let summary_path = ws.file_path("test_loop_summary.csv");
+    let state_path = ws.file_path("test_loop_state.txt");
+    let deep_data_path = ws.file_path("test_deep_dataset.tsv");
 
     let config = LoopConfig {
         iterations: 1,
@@ -162,12 +127,4 @@ fn test_autonomous_loop_single_iteration() {
         fs::metadata(&cand_ckpt_path).is_ok(),
         "Candidate checkpoint should be saved"
     );
-
-    let _ = fs::remove_file(&data_path);
-    let _ = fs::remove_file(&deep_data_path);
-    let _ = fs::remove_file(&best_path);
-    let _ = fs::remove_file(&cand_path);
-    let _ = fs::remove_file(&cand_ckpt_path);
-    let _ = fs::remove_file(&state_path);
-    let _ = fs::remove_file(&summary_path);
 }
