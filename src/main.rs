@@ -47,59 +47,66 @@ fn main() {
     }
 }
 
+struct ArgParser<'a> {
+    args: &'a [String],
+}
+
+impl<'a> ArgParser<'a> {
+    fn new(args: &'a [String]) -> Self {
+        Self { args }
+    }
+
+    fn has_flag(&self, long: &str, short: Option<&str>) -> bool {
+        self.args
+            .iter()
+            .any(|arg| arg == long || short.map(|s| arg == s).unwrap_or(false))
+    }
+
+    fn get_value<T: std::str::FromStr>(&self, long: &str, short: Option<&str>) -> Option<T> {
+        let mut i = 0;
+        while i < self.args.len() {
+            let is_match =
+                self.args[i] == long || short.map(|s| self.args[i] == s).unwrap_or(false);
+            if is_match && i + 1 < self.args.len() {
+                return match self.args[i + 1].parse::<T>() {
+                    Ok(val) => Some(val),
+                    Err(_) => {
+                        eprintln!(
+                            "Warning: Invalid value for '{}': '{}'",
+                            long,
+                            self.args[i + 1]
+                        );
+                        None
+                    }
+                };
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn get_string(&self, long: &str, short: Option<&str>) -> Option<String> {
+        let mut i = 0;
+        while i < self.args.len() {
+            let is_match =
+                self.args[i] == long || short.map(|s| self.args[i] == s).unwrap_or(false);
+            if is_match && i + 1 < self.args.len() {
+                return Some(self.args[i + 1].clone());
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
 fn run_train_nnue(args: &[String]) {
     use tabula_shogi::eval::NNUETrainer;
     use tabula_shogi::selfplay::DatasetHandler;
 
-    let mut data_path = String::new();
-    let mut out_path = "nnue.bin".to_string();
-    let mut epochs = 20;
-    let mut lr = 0.001f32;
-    let mut batch_size = 64;
-    let mut k = 400.0f32;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--data" => {
-                if i + 1 < args.len() {
-                    data_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--out" | "-o" => {
-                if i + 1 < args.len() {
-                    out_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--epochs" | "-e" => {
-                if i + 1 < args.len() {
-                    epochs = args[i + 1].parse().unwrap_or(epochs);
-                    i += 1;
-                }
-            }
-            "--lr" => {
-                if i + 1 < args.len() {
-                    lr = args[i + 1].parse().unwrap_or(lr);
-                    i += 1;
-                }
-            }
-            "--batch-size" | "-b" => {
-                if i + 1 < args.len() {
-                    batch_size = args[i + 1].parse().unwrap_or(batch_size);
-                    i += 1;
-                }
-            }
-            "--k" => {
-                if i + 1 < args.len() {
-                    k = args[i + 1].parse().unwrap_or(k);
-                    i += 1;
-                }
-            }
-            "--help" | "-h" => {
-                println!(
-                    r#"TabulaShogi NNUE Trainer
+    let parser = ArgParser::new(args);
+    if parser.has_flag("--help", Some("-h")) {
+        println!(
+            r#"TabulaShogi NNUE Trainer
 USAGE:
     tabula-shogi train-nnue --data <PATH> [OPTIONS]
 
@@ -112,13 +119,18 @@ OPTIONS:
         --k <FLOAT>          Logistic scale factor K [default: 400.0]
     -h, --help               Print this help message
 "#
-                );
-                return;
-            }
-            _ => {}
-        }
-        i += 1;
+        );
+        return;
     }
+
+    let data_path = parser.get_string("--data", None).unwrap_or_default();
+    let out_path = parser
+        .get_string("--out", Some("-o"))
+        .unwrap_or_else(|| "nnue.bin".to_string());
+    let epochs = parser.get_value("--epochs", Some("-e")).unwrap_or(20);
+    let lr = parser.get_value("--lr", None).unwrap_or(0.001f32);
+    let batch_size = parser.get_value("--batch-size", Some("-b")).unwrap_or(64);
+    let k = parser.get_value("--k", None).unwrap_or(400.0f32);
 
     if data_path.is_empty() {
         eprintln!("Error: --data <FILE> is required.");
@@ -234,70 +246,32 @@ fn parse_eval_mode(desc: &str) -> (String, tabula_shogi::eval::EvalMode) {
 fn run_match(args: &[String]) {
     use tabula_shogi::arena::{MatchConfig, MatchRunner, SprtConfig};
 
-    let mut engine1_desc = "HCE".to_string();
-    let mut engine2_desc = "NNUE".to_string();
-    let mut pairs = 20;
-    let mut depth = 2;
-    let mut threads = 2;
-    let mut opening = 6;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--engine1" | "-e1" => {
-                if i + 1 < args.len() {
-                    engine1_desc = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--engine2" | "-e2" => {
-                if i + 1 < args.len() {
-                    engine2_desc = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--pairs" | "-p" => {
-                if i + 1 < args.len() {
-                    pairs = args[i + 1].parse().unwrap_or(pairs);
-                    i += 1;
-                }
-            }
-            "--depth" | "-d" => {
-                if i + 1 < args.len() {
-                    depth = args[i + 1].parse().unwrap_or(depth);
-                    i += 1;
-                }
-            }
-            "--threads" | "-t" => {
-                if i + 1 < args.len() {
-                    threads = args[i + 1].parse().unwrap_or(threads);
-                    i += 1;
-                }
-            }
-            "--opening" | "-o" => {
-                if i + 1 < args.len() {
-                    opening = args[i + 1].parse().unwrap_or(opening);
-                    i += 1;
-                }
-            }
-            "--help" | "-h" => {
-                println!("TabulaShogi Arena Match");
-                println!("USAGE:\n    tabula-shogi match [OPTIONS]");
-                println!("OPTIONS:");
-                println!("    --engine1 <HCE|NNUE|PATH>   First engine model [default: HCE]");
-                println!("    --engine2 <HCE|NNUE|PATH>   Second engine model [default: NNUE]");
-                println!(
-                    "    -p, --pairs <N>             Number of game pairs [default: 20] (total = 2*pairs)"
-                );
-                println!("    -d, --depth <D>             Search depth [default: 2]");
-                println!("    -t, --threads <T>           Worker threads [default: 2]");
-                println!("    -o, --opening <K>           Random opening plies [default: 6]");
-                return;
-            }
-            _ => {}
-        }
-        i += 1;
+    let parser = ArgParser::new(args);
+    if parser.has_flag("--help", Some("-h")) {
+        println!("TabulaShogi Arena Match");
+        println!("USAGE:\n    tabula-shogi match [OPTIONS]");
+        println!("OPTIONS:");
+        println!("    --engine1 <HCE|NNUE|PATH>   First engine model [default: HCE]");
+        println!("    --engine2 <HCE|NNUE|PATH>   Second engine model [default: NNUE]");
+        println!(
+            "    -p, --pairs <N>             Number of game pairs [default: 20] (total = 2*pairs)"
+        );
+        println!("    -d, --depth <D>             Search depth [default: 2]");
+        println!("    -t, --threads <T>           Worker threads [default: 2]");
+        println!("    -o, --opening <K>           Random opening plies [default: 6]");
+        return;
     }
+
+    let engine1_desc = parser
+        .get_string("--engine1", Some("-e1"))
+        .unwrap_or_else(|| "HCE".to_string());
+    let engine2_desc = parser
+        .get_string("--engine2", Some("-e2"))
+        .unwrap_or_else(|| "NNUE".to_string());
+    let pairs = parser.get_value("--pairs", Some("-p")).unwrap_or(20);
+    let depth = parser.get_value("--depth", Some("-d")).unwrap_or(2);
+    let threads = parser.get_value("--threads", Some("-t")).unwrap_or(2);
+    let opening = parser.get_value("--opening", Some("-o")).unwrap_or(6);
 
     let (name_a, eval_a) = parse_eval_mode(&engine1_desc);
     let (name_b, eval_b) = parse_eval_mode(&engine2_desc);
@@ -322,157 +296,98 @@ fn run_match(args: &[String]) {
 fn run_loop(args: &[String]) {
     use tabula_shogi::arena::{LoopConfig, SelfImprovementLoop};
 
+    let parser = ArgParser::new(args);
+    if parser.has_flag("--help", Some("-h")) {
+        println!("TabulaShogi Autonomous Self-Improvement Loop (HalfKP)");
+        println!("USAGE:\n    tabula-shogi loop [OPTIONS]");
+        println!("OPTIONS:");
+        println!("    -i, --iterations <N>    Number of improvement generations [default: 3]");
+        println!("    -g, --games <N>         Self-play games per generation [default: 120]");
+        println!("    -p, --eval-pairs <N>    Evaluation game pairs per generation [default: 15]");
+        println!("    -t, --threads <T>       Worker threads [default: 2]");
+        println!("    -d, --depth <D>         Search depth [default: 2]");
+        println!("    -e, --epochs <E>        HalfKP training epochs per generation [default: 3]");
+        println!("        --lr <FLOAT>        Learning rate [default: 0.001]");
+        println!("    -b, --batch-size <N>    Mini-batch size [default: 1024]");
+        println!(
+            "        --data <PATH>       Path to cumulative training dataset [default: loop_dataset.tsv]"
+        );
+        println!(
+            "        --deep-data <PATH>  Path to deep distilled position pool [default: deep_dataset.tsv]"
+        );
+        println!(
+            "        --best <PATH>       Path to best model binary [default: models/best_halfkp.bin]"
+        );
+        println!(
+            "        --candidate <PATH>  Path to candidate model binary [default: models/candidate_halfkp.bin]"
+        );
+        println!(
+            "        --candidate-ckpt <PATH> Path to candidate checkpoint [default: models/candidate_halfkp_ckpt.bin]"
+        );
+        println!(
+            "        --min-games <N>     Minimum evaluation games for promotion [default: 20]"
+        );
+        println!(
+            "        --summary <PATH>    Path to CSV progress summary log [default: loop_summary.csv]"
+        );
+        println!("        --start-iter <N>    Explicit generation starting number");
+        println!(
+            "        --state <PATH>      Path to generation state file [default: loop_state.txt]"
+        );
+        return;
+    }
+
     let mut config = LoopConfig::default();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--iterations" | "-i" => {
-                if i + 1 < args.len() {
-                    config.iterations = args[i + 1].parse().unwrap_or(config.iterations);
-                    i += 1;
-                }
-            }
-            "--games" | "-g" => {
-                if i + 1 < args.len() {
-                    config.games_per_iteration =
-                        args[i + 1].parse().unwrap_or(config.games_per_iteration);
-                    i += 1;
-                }
-            }
-            "--eval-pairs" | "-p" => {
-                if i + 1 < args.len() {
-                    config.eval_pairs = args[i + 1].parse().unwrap_or(config.eval_pairs);
-                    i += 1;
-                }
-            }
-            "--threads" | "-t" => {
-                if i + 1 < args.len() {
-                    config.threads = args[i + 1].parse().unwrap_or(config.threads);
-                    i += 1;
-                }
-            }
-            "--depth" | "-d" => {
-                if i + 1 < args.len() {
-                    config.depth = args[i + 1].parse().unwrap_or(config.depth);
-                    i += 1;
-                }
-            }
-            "--epochs" | "-e" => {
-                if i + 1 < args.len() {
-                    config.epochs = args[i + 1].parse().unwrap_or(config.epochs);
-                    i += 1;
-                }
-            }
-            "--lr" => {
-                if i + 1 < args.len() {
-                    config.lr = args[i + 1].parse().unwrap_or(config.lr);
-                    i += 1;
-                }
-            }
-            "--batch-size" | "-b" => {
-                if i + 1 < args.len() {
-                    config.batch_size = args[i + 1].parse().unwrap_or(config.batch_size);
-                    i += 1;
-                }
-            }
-            "--data" => {
-                if i + 1 < args.len() {
-                    config.data_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--best" => {
-                if i + 1 < args.len() {
-                    config.best_model_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--candidate" => {
-                if i + 1 < args.len() {
-                    config.candidate_model_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--candidate-ckpt" => {
-                if i + 1 < args.len() {
-                    config.candidate_ckpt_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--min-games" => {
-                if i + 1 < args.len() {
-                    config.min_promotion_games =
-                        args[i + 1].parse().unwrap_or(config.min_promotion_games);
-                    i += 1;
-                }
-            }
-            "--summary" => {
-                if i + 1 < args.len() {
-                    config.summary_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--deep-data" => {
-                if i + 1 < args.len() {
-                    config.deep_data_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--start-iter" => {
-                if i + 1 < args.len() {
-                    config.start_iteration = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--state" => {
-                if i + 1 < args.len() {
-                    config.state_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--help" | "-h" => {
-                println!("TabulaShogi Autonomous Self-Improvement Loop (HalfKP)");
-                println!("USAGE:\n    tabula-shogi loop [OPTIONS]");
-                println!("OPTIONS:");
-                println!(
-                    "    -i, --iterations <N>    Number of improvement generations [default: 3]"
-                );
-                println!(
-                    "    -g, --games <N>         Self-play games per generation [default: 120]"
-                );
-                println!(
-                    "    -p, --eval-pairs <N>    Evaluation game pairs per generation [default: 15]"
-                );
-                println!("    -t, --threads <T>       Worker threads [default: 2]");
-                println!("    -d, --depth <D>         Search depth [default: 2]");
-                println!(
-                    "    -e, --epochs <E>        HalfKP training epochs per generation [default: 3]"
-                );
-                println!("        --lr <FLOAT>        Learning rate [default: 0.001]");
-                println!("    -b, --batch-size <N>    Mini-batch size [default: 1024]");
-                println!(
-                    "        --data <PATH>       Path to cumulative training dataset [default: loop_dataset.tsv]"
-                );
-                println!(
-                    "        --best <PATH>       Path to best model binary [default: models/best_halfkp.bin]"
-                );
-                println!(
-                    "        --candidate <PATH>  Path to candidate model binary [default: models/candidate_halfkp.bin]"
-                );
-                println!(
-                    "        --candidate-ckpt <PATH> Path to candidate checkpoint [default: models/candidate_halfkp_ckpt.bin]"
-                );
-                println!(
-                    "        --min-games <N>     Minimum evaluation games for promotion [default: 20]"
-                );
-                println!(
-                    "        --summary <PATH>    Path to CSV progress summary log [default: loop_summary.csv]"
-                );
-                return;
-            }
-            _ => {}
-        }
-        i += 1;
+    if let Some(val) = parser.get_value("--iterations", Some("-i")) {
+        config.iterations = val;
+    }
+    if let Some(val) = parser.get_value("--games", Some("-g")) {
+        config.games_per_iteration = val;
+    }
+    if let Some(val) = parser.get_value("--eval-pairs", Some("-p")) {
+        config.eval_pairs = val;
+    }
+    if let Some(val) = parser.get_value("--threads", Some("-t")) {
+        config.threads = val;
+    }
+    if let Some(val) = parser.get_value("--depth", Some("-d")) {
+        config.depth = val;
+    }
+    if let Some(val) = parser.get_value("--epochs", Some("-e")) {
+        config.epochs = val;
+    }
+    if let Some(val) = parser.get_value("--lr", None) {
+        config.lr = val;
+    }
+    if let Some(val) = parser.get_value("--batch-size", Some("-b")) {
+        config.batch_size = val;
+    }
+    if let Some(val) = parser.get_string("--data", None) {
+        config.data_path = val;
+    }
+    if let Some(val) = parser.get_string("--deep-data", None) {
+        config.deep_data_path = val;
+    }
+    if let Some(val) = parser.get_string("--best", None) {
+        config.best_model_path = val;
+    }
+    if let Some(val) = parser.get_string("--candidate", None) {
+        config.candidate_model_path = val;
+    }
+    if let Some(val) = parser.get_string("--candidate-ckpt", None) {
+        config.candidate_ckpt_path = val;
+    }
+    if let Some(val) = parser.get_value("--min-games", None) {
+        config.min_promotion_games = val;
+    }
+    if let Some(val) = parser.get_string("--summary", None) {
+        config.summary_path = val;
+    }
+    if let Some(val) = parser.get_value("--start-iter", None) {
+        config.start_iteration = Some(val);
+    }
+    if let Some(val) = parser.get_string("--state", None) {
+        config.state_path = val;
     }
 
     SelfImprovementLoop::run(&config);
