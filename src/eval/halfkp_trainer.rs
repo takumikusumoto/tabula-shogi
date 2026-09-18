@@ -275,7 +275,12 @@ impl HalfKPTrainer {
             total_mse_loss += error * error;
 
             // dL / d_score
-            let d_sigmoid = pred * (1.0 - pred) * ln10_div_k;
+            // f32の飽和対策: score_cp が ±27,000 付近で pred が正確に 0.0 または 1.0 になり
+            // d_sigmoid = pred*(1-pred) = 0 になる (勾配消失) を防ぐため、
+            // 入力スコアを ±6000 でクランプした安定版シグモイドから勾配を算出する
+            let stable_score_cp = score_cp.clamp(-6000.0, 6000.0);
+            let stable_pred = Self::sigmoid(stable_score_cp, k);
+            let d_sigmoid = (stable_pred * (1.0 - stable_pred) * ln10_div_k).max(1e-7);
             let d_loss_d_score = 2.0 * error * d_sigmoid;
 
             // 評価値クランプ勾配ガード: 飽和領域でも引き戻し勾配は通過させる

@@ -337,7 +337,7 @@ impl HalfKPEvaluator {
                     // 捕獲駒は生駒として手番側 (us) の手駒へ加算
                     let unpromoted_pt = captured.piece_type.unpromote();
                     let h_idx = unpromoted_pt.hand_index().expect("Valid hand piece");
-                    let prev_hand_count = pos_before.hand[us.index()][h_idx] as usize;
+                    let prev_hand_count = (pos_before.hand[us.index()][h_idx] as usize).min(17);
                     let is_self = us == color;
                     let h_feat = Self::hand_to_feature(unpromoted_pt, prev_hand_count, is_self);
                     let feat_hand = k_offset + h_feat;
@@ -451,8 +451,9 @@ impl HalfKPEvaluator {
                     // 捕獲駒は手駒へ加算 (直前の手の前の手駒枚数は、現在の手駒枚数 - 1)
                     let unpromoted_pt = cap.piece_type.unpromote();
                     let h_idx = unpromoted_pt.hand_index().expect("Valid hand piece");
-                    let prev_hand_count =
-                        (pos_after.hand[us.index()][h_idx] as usize).saturating_sub(1);
+                    let prev_hand_count = (pos_after.hand[us.index()][h_idx] as usize)
+                        .saturating_sub(1)
+                        .min(17);
                     let is_self = us == color;
                     let h_feat = Self::hand_to_feature(unpromoted_pt, prev_hand_count, is_self);
                     let feat_hand = k_offset + h_feat;

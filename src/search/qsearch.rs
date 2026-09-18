@@ -53,6 +53,8 @@ pub fn quiescence(
             Some(&engine.history),
         );
 
+        let mut best_score = -MATE_SCORE + (ply as i32);
+
         for mv in evasions {
             pos.do_move(mv);
             engine.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
@@ -63,6 +65,9 @@ pub fn quiescence(
                 return 0;
             }
 
+            if score > best_score {
+                best_score = score;
+            }
             if score >= beta {
                 return beta;
             }
@@ -70,7 +75,7 @@ pub fn quiescence(
                 alpha = score;
             }
         }
-        return alpha;
+        return best_score;
     }
 
     // 王手されていない通常局面: 静的評価（立合いスコア）

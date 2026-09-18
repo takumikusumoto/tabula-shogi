@@ -133,17 +133,28 @@ impl DatasetHandler {
         for line in reader.lines() {
             let l = line?;
             if let Some(entry) = Self::parse_entry(&l) {
-                if recent_queue.len() < recent_target {
+                if recent_target == 0 {
+                    // 全量を過去履歴リザーバサンプリングとして直接処理
+                    history_count += 1;
+                    if history_samples.len() < history_target {
+                        history_samples.push(entry);
+                    } else if history_target > 0 {
+                        let j = rng.gen_range(history_count);
+                        if j < history_target {
+                            history_samples[j] = entry;
+                        }
+                    }
+                } else if recent_queue.len() < recent_target {
                     recent_queue.push_back(entry);
                 } else {
                     // 最新バッファからあふれた最古の要素が過去プールに流入
-                    let displaced = recent_queue.pop_front().unwrap();
+                    let displaced = recent_queue.pop_front().unwrap_or_else(|| entry.clone());
                     recent_queue.push_back(entry);
 
                     history_count += 1;
                     if history_samples.len() < history_target {
                         history_samples.push(displaced);
-                    } else {
+                    } else if history_target > 0 {
                         // リザーバサンプリング (一様確率で置換)
                         let j = rng.gen_range(history_count);
                         if j < history_target {
