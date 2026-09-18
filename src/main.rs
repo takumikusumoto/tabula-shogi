@@ -310,10 +310,10 @@ fn run_loop(args: &[String]) {
         println!("        --lr <FLOAT>        Learning rate [default: 0.001]");
         println!("    -b, --batch-size <N>    Mini-batch size [default: 1024]");
         println!(
-            "        --data <PATH>       Path to cumulative training dataset [default: loop_dataset.tsv]"
+            "        --data <PATH>       Path to cumulative training dataset [default: data/loop_dataset.tsv]"
         );
         println!(
-            "        --deep-data <PATH>  Path to deep distilled position pool [default: deep_dataset.tsv]"
+            "        --deep-data <PATH>  Path to deep distilled position pool [default: data/deep_dataset.tsv]"
         );
         println!(
             "        --best <PATH>       Path to best model binary [default: models/best_halfkp.bin]"
@@ -328,11 +328,11 @@ fn run_loop(args: &[String]) {
             "        --min-games <N>     Minimum evaluation games for promotion [default: 20]"
         );
         println!(
-            "        --summary <PATH>    Path to CSV progress summary log [default: loop_summary.csv]"
+            "        --summary <PATH>    Path to CSV progress summary log [default: data/loop_summary.csv]"
         );
         println!("        --start-iter <N>    Explicit generation starting number");
         println!(
-            "        --state <PATH>      Path to generation state file [default: loop_state.txt]"
+            "        --state <PATH>      Path to generation state file [default: data/loop_state.txt]"
         );
         return;
     }

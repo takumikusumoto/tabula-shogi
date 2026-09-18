@@ -138,7 +138,7 @@ fn main() {
 
     // 2. データセットから局面サンプリング
     println!("\n[2] Sampling Positions from loop_dataset.tsv...");
-    let dataset_path = "loop_dataset.tsv";
+    let dataset_path = "data/loop_dataset.tsv";
     let file = match File::open(dataset_path) {
         Ok(f) => f,
         Err(e) => {

@@ -73,13 +73,13 @@ pub struct LoopStoragePaths {
 impl Default for LoopStoragePaths {
     fn default() -> Self {
         Self {
-            state_path: "loop_state.txt".to_string(),
-            data_path: "loop_dataset.tsv".to_string(),
-            deep_data_path: "deep_dataset.tsv".to_string(),
+            state_path: "data/loop_state.txt".to_string(),
+            data_path: "data/loop_dataset.tsv".to_string(),
+            deep_data_path: "data/deep_dataset.tsv".to_string(),
             best_model_path: "models/best_halfkp.bin".to_string(),
             candidate_model_path: "models/candidate_halfkp.bin".to_string(),
             candidate_ckpt_path: "models/candidate_halfkp_ckpt.bin".to_string(),
-            summary_path: "loop_summary.csv".to_string(),
+            summary_path: "data/loop_summary.csv".to_string(),
         }
     }
 }
