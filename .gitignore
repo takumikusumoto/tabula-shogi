@@ -10,4 +10,4 @@
 *.err
 loop_state.txt
 *.bak
-
+archive/
