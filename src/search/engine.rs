@@ -201,6 +201,9 @@ impl SearchEngine {
     pub fn clear(&mut self) {
         self.tt.clear();
         self.reset_heuristics();
+        for acc in &mut self.halfkp_accumulators {
+            *acc = crate::eval::HalfKPAccumulator::empty();
+        }
     }
 
     /// 自己対局・再評価用の固定深さ詳細探索 (結果種別 SearchOutcome を直接返却)

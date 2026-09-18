@@ -65,6 +65,9 @@ impl SEE {
             // 最小価値の攻撃駒 (Least Valuable Attacker) を探す
             let lva_idx = Self::find_lva(&attackers, side);
             if let Some(idx) = lva_idx {
+                if d + 1 >= MAX_SEE_DEPTH {
+                    break;
+                }
                 d += 1;
                 // d手目で手番側が取る駒は直前の current_pt
                 gain[d] = current_pt.base_value();

@@ -296,7 +296,8 @@ impl HalfKPEvaluator {
                 let old_count = pos_before.hand[us.index()][h_idx] as usize;
                 if old_count > 0 {
                     let is_self = us == color;
-                    let h_feat = Self::hand_to_feature(drop_pt, old_count - 1, is_self);
+                    let count_slot = (old_count - 1).min(17);
+                    let h_feat = Self::hand_to_feature(drop_pt, count_slot, is_self);
                     let feat_idx = k_offset + h_feat;
                     Self::sub_weights(
                         &mut acc.accumulation[c_idx],
@@ -404,7 +405,8 @@ impl HalfKPEvaluator {
                 let h_idx = drop_pt.hand_index().expect("Valid hand piece");
                 let prev_count = pos_after.hand[us.index()][h_idx] as usize + 1;
                 let is_self = us == color;
-                let h_feat = Self::hand_to_feature(drop_pt, prev_count - 1, is_self);
+                let count_slot = (prev_count - 1).min(17);
+                let h_feat = Self::hand_to_feature(drop_pt, count_slot, is_self);
                 let feat_idx = k_offset + h_feat;
                 Self::sub_weights(
                     &mut acc.accumulation[c_idx],
