@@ -68,6 +68,11 @@ impl Sprt {
 
     /// 対局結果を 1 局追加 (1.0: 勝ち, 0.5: 引分, 0.0: 負け)
     pub fn record_result(&mut self, score: f64) {
+        // 終端状態 (Pass または Fail) に達した検定結果は不可逆（ラッチ）
+        if self.status != SprtStatus::Continue {
+            return;
+        }
+
         if score >= 0.75 {
             self.wins += 1;
         } else if score <= 0.25 {
@@ -81,14 +86,28 @@ impl Sprt {
 
     /// 対局結果のバッチ追加
     pub fn record_batch(&mut self, wins: usize, losses: usize, draws: usize) {
+        // 終端状態 (Pass または Fail) に達した検定結果は不可逆（ラッチ）
+        if self.status != SprtStatus::Continue {
+            return;
+        }
+
         self.wins += wins;
         self.losses += losses;
         self.draws += draws;
         self.update_llr();
     }
 
+    /// 検定が確定（Pass または Fail）したかを判定
+    pub fn is_decided(&self) -> bool {
+        self.status != SprtStatus::Continue
+    }
+
     /// 対数尤度比 (LLR) の更新
     fn update_llr(&mut self) {
+        if self.status != SprtStatus::Continue {
+            return;
+        }
+
         let total = (self.wins + self.losses + self.draws) as f64;
         if total < 2.0 {
             self.status = SprtStatus::Continue;
@@ -107,8 +126,10 @@ impl Sprt {
         let s = (w + 0.5 * d) / total;
 
         // 標本分散: sum((x_i - s)^2) / N
-        let var = (w * (1.0 - s).powi(2) + d * (0.5 - s).powi(2) + l * (0.0 - s).powi(2)) / total;
-        let var = var.max(0.01); // ゼロ除算防止
+        // 分散下限: 全勝・全敗時の極小分散によるLLR爆発を防ぐため 0.05 を下限として設定
+        let sample_var =
+            (w * (1.0 - s).powi(2) + d * (0.5 - s).powi(2) + l * (0.0 - s).powi(2)) / total;
+        let var = sample_var.max(0.05);
 
         // 正規近似に基づく LLR 計算 (Fishtest 準拠)
         // LLR = (p1 - p0) / var * sum(x_i - (p0 + p1) / 2)

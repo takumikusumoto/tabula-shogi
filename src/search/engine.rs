@@ -765,6 +765,10 @@ impl SearchEngine {
                 let score = -self.negamax(pos, depth - 1, -beta, -alpha, 1, true, &ctx);
                 pos.undo_move();
 
+                if stop_flag.load(Ordering::Relaxed) {
+                    return;
+                }
+
                 if score > best_score {
                     best_score = score;
                     best_move = Some(mv);
@@ -774,7 +778,9 @@ impl SearchEngine {
                 }
             }
 
-            if let Some(bm) = best_move {
+            if !stop_flag.load(Ordering::Relaxed)
+                && let Some(bm) = best_move
+            {
                 self.tt.store(
                     pos.hash,
                     depth,

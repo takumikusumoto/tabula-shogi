@@ -5,7 +5,7 @@ use crate::movegen::MoveGenerator;
 use crate::search::SearchEngine;
 use crate::selfplay::game::SimpleRng;
 use crate::types::Color;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -92,12 +92,16 @@ impl MatchRunner {
 
         let pair_counter = Arc::new(AtomicUsize::new(start_pair));
         let finished_counter = Arc::new(AtomicUsize::new(start_pair));
+        let early_stop_flag = Arc::new(AtomicBool::new(false));
 
         let wins_a_total = Arc::new(AtomicUsize::new(initial_wins_a));
         let wins_b_total = Arc::new(AtomicUsize::new(initial_wins_b));
         let draws_total = Arc::new(AtomicUsize::new(initial_draws));
 
         let sprt_tracker = if let Some(ps) = prev_sprt {
+            if ps.is_decided() {
+                early_stop_flag.store(true, Ordering::Relaxed);
+            }
             Some(Arc::new(Mutex::new(ps)))
         } else {
             config
@@ -133,6 +137,7 @@ impl MatchRunner {
             for thread_id in 0..num_threads {
                 let pair_counter = Arc::clone(&pair_counter);
                 let finished_counter = Arc::clone(&finished_counter);
+                let early_stop_flag = Arc::clone(&early_stop_flag);
                 let wins_a_total = Arc::clone(&wins_a_total);
                 let wins_b_total = Arc::clone(&wins_b_total);
                 let draws_total = Arc::clone(&draws_total);
@@ -145,6 +150,9 @@ impl MatchRunner {
                         .with_eval_mode(config.eval_b.clone());
 
                     loop {
+                        if early_stop_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let p_idx = pair_counter.fetch_add(1, Ordering::Relaxed);
                         if p_idx >= pairs_total {
                             break;
@@ -203,6 +211,9 @@ impl MatchRunner {
                         if let Some(ref tracker) = sprt_tracker {
                             let mut s = tracker.lock().unwrap();
                             s.record_batch(w_a, w_b, dr);
+                            if s.is_decided() {
+                                early_stop_flag.store(true, Ordering::Relaxed);
+                            }
                         }
 
                         let fin = finished_counter.fetch_add(1, Ordering::Relaxed) + 1;

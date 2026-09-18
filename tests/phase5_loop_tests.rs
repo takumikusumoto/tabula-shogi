@@ -22,23 +22,32 @@ fn test_sprt_llr_calculation() {
     // 30勝0敗
     sprt_win.record_batch(30, 0, 0);
     assert_eq!(sprt_win.status, SprtStatus::Pass);
+    assert!(sprt_win.is_decided());
     assert!(sprt_win.llr >= sprt_win.upper_bound);
     assert!(sprt_win.win_rate() > 0.9);
     assert!(sprt_win.elo_diff() > 100.0);
+    // ラッチ検証: Pass確定後に対局を追加してもPass状態が覆らないこと
+    sprt_win.record_batch(0, 10, 0);
+    assert_eq!(sprt_win.status, SprtStatus::Pass);
 
     // 2. 圧倒的に負け越した場合 (Fail 判定)
     let mut sprt_loss = Sprt::new(config.clone());
     // 0勝30敗
     sprt_loss.record_batch(0, 30, 0);
     assert_eq!(sprt_loss.status, SprtStatus::Fail);
+    assert!(sprt_loss.is_decided());
     assert!(sprt_loss.llr <= sprt_loss.lower_bound);
     assert!(sprt_loss.win_rate() < 0.1);
     assert!(sprt_loss.elo_diff() < -100.0);
+    // ラッチ検証: Fail確定後に対局を追加してもFail状態が覆らないこと
+    sprt_loss.record_batch(10, 0, 0);
+    assert_eq!(sprt_loss.status, SprtStatus::Fail);
 
     // 3. 互角の対局の場合 (Continue 判定)
     let mut sprt_even = Sprt::new(config);
     sprt_even.record_batch(5, 5, 2);
     assert_eq!(sprt_even.status, SprtStatus::Continue);
+    assert!(!sprt_even.is_decided());
     assert!(sprt_even.llr > sprt_even.lower_bound && sprt_even.llr < sprt_even.upper_bound);
     assert!((sprt_even.win_rate() - 0.5).abs() < 0.1);
 }

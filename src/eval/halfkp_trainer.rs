@@ -555,7 +555,13 @@ impl HalfKPTrainer {
         if let Err(_e) = std::fs::rename(&tmp_path, path) {
             // 万が一プラットフォーム起因で置換失敗した場合のみ削除して再試行
             let _ = std::fs::remove_file(path);
-            std::fs::rename(&tmp_path, path)?;
+            if let Err(e) = std::fs::rename(&tmp_path, path) {
+                // 再度失敗した場合はバックアップから復元して元チェックポイントの消失を防止
+                if std::path::Path::new(&bak_path).exists() {
+                    let _ = std::fs::copy(&bak_path, path);
+                }
+                return Err(e);
+            }
         }
 
         Ok(())

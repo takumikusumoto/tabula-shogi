@@ -148,7 +148,28 @@ impl SelfImprovementLoop {
         println!("Summary Log: {}", config.paths.summary_path);
         println!("============================================================");
 
+        // 0. パス重複チェック: best_model_path と candidate_model_path の衝突防止 (昇格ゲート無効化の完全防止)
+        let best_canonical = Path::new(&config.paths.best_model_path)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&config.paths.best_model_path));
+        let cand_canonical = Path::new(&config.paths.candidate_model_path)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&config.paths.candidate_model_path));
+        if best_canonical == cand_canonical
+            || config
+                .paths
+                .best_model_path
+                .eq_ignore_ascii_case(&config.paths.candidate_model_path)
+        {
+            eprintln!(
+                "[Fatal Error] best_model_path ('{}') and candidate_model_path ('{}') resolve to the same file! Aborting to protect champion model.",
+                config.paths.best_model_path, config.paths.candidate_model_path
+            );
+            return;
+        }
+
         // 初期モデルの確認 (HalfKPモデルが存在するか)
+        // 既存モデルの読み込み失敗時はサイレントに HCE へ退行せず fail-closed で中断
         let mut current_best_eval = if Path::new(&config.paths.best_model_path).exists() {
             match HalfKPEvaluator::load_from_file(&config.paths.best_model_path) {
                 Ok(eval) => {
@@ -159,11 +180,11 @@ impl SelfImprovementLoop {
                     EvalMode::HalfKP(Arc::new(eval))
                 }
                 Err(e) => {
-                    println!(
-                        "Failed to load '{}' ({e}), using HCE as base",
+                    eprintln!(
+                        "[Fatal Error] Failed to load existing best HalfKP model '{}': {e}. Aborting to prevent silent HCE fallback.",
                         config.paths.best_model_path
                     );
-                    EvalMode::Hce
+                    return;
                 }
             }
         } else {
@@ -198,17 +219,22 @@ impl SelfImprovementLoop {
                 cur_gen, round, config.iterations
             );
 
-            // Step 1: 自己対局データ生成
+            // Step 1: 自己対局データ生成 (I/O障害やworker異常時は fail-closed で即座に中断)
             let gen_seed = 0x9E3779B97F4A7C15u64
                 .wrapping_add((cur_gen as u64).wrapping_mul(0x517cc1b727220a95));
-            Self::generate_selfplay_data(
+            if let Err(e) = Self::generate_selfplay_data(
                 config.games_per_iteration,
                 &config.arena,
                 &config.paths,
                 &current_best_eval,
                 cur_gen,
                 gen_seed,
-            );
+            ) {
+                eprintln!(
+                    "[Fatal Error] Step 1 Self-play failed in Gen {cur_gen}: {e}. Aborting pipeline to prevent training on corrupt/incomplete data."
+                );
+                return;
+            }
 
             // Step 2: データセット準備 & IIZ 深読み再評価
             let (mut dataset, successful_relabelled_count) = match Self::prepare_training_dataset(
@@ -285,7 +311,7 @@ impl SelfImprovementLoop {
         current_best_eval: &EvalMode,
         cur_gen: usize,
         gen_seed: u64,
-    ) {
+    ) -> Result<(), String> {
         let half_games = games_per_iteration / 2;
         let champ_games = games_per_iteration - half_games;
 
@@ -304,7 +330,13 @@ impl SelfImprovementLoop {
             seed: gen_seed,
             ..Default::default()
         };
-        SelfPlayManager::run(sp_cfg_champ);
+        let stats_champ = SelfPlayManager::run(sp_cfg_champ);
+        if stats_champ.io_errors > 0 || stats_champ.completed_games < champ_games {
+            return Err(format!(
+                "Champion self-play encountered {} I/O errors or incomplete games ({}/{})",
+                stats_champ.io_errors, stats_champ.completed_games, champ_games
+            ));
+        }
 
         // 候補モデル（Candidate HalfKP）による探査自己対局（存在する場合）
         let candidate_eval_opt = if Path::new(&paths.candidate_model_path).exists() {
@@ -324,7 +356,13 @@ impl SelfImprovementLoop {
                 start_game_id: champ_games,
                 ..Default::default()
             };
-            SelfPlayManager::run(sp_cfg_cand);
+            let stats_cand = SelfPlayManager::run(sp_cfg_cand);
+            if stats_cand.io_errors > 0 || stats_cand.completed_games < half_games {
+                return Err(format!(
+                    "Candidate exploration self-play encountered {} I/O errors or incomplete games ({}/{})",
+                    stats_cand.io_errors, stats_cand.completed_games, half_games
+                ));
+            }
         } else if half_games > 0 {
             // 初回等でCandidateが存在しない場合はChampionで全数補完
             let sp_cfg_fallback = SelfPlayConfig {
@@ -337,8 +375,16 @@ impl SelfImprovementLoop {
                 start_game_id: champ_games,
                 ..Default::default()
             };
-            SelfPlayManager::run(sp_cfg_fallback);
+            let stats_fallback = SelfPlayManager::run(sp_cfg_fallback);
+            if stats_fallback.io_errors > 0 || stats_fallback.completed_games < half_games {
+                return Err(format!(
+                    "Fallback champion self-play encountered {} I/O errors or incomplete games ({}/{})",
+                    stats_fallback.io_errors, stats_fallback.completed_games, half_games
+                ));
+            }
         }
+
+        Ok(())
     }
 
     /// Step 2: データセットサンプリング読込 & IIZ 深読み再評価 (知識蒸留)
