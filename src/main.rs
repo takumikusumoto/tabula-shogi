@@ -390,7 +390,10 @@ fn run_loop(args: &[String]) {
         config.paths.state_path = val;
     }
 
-    SelfImprovementLoop::run(&config);
+    if let Err(e) = SelfImprovementLoop::run(&config) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
 }
 
 fn print_main_help() {

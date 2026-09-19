@@ -122,7 +122,7 @@ pub struct SelfImprovementLoop;
 
 impl SelfImprovementLoop {
     /// 自律的自己改善ループを実行 (本格 HalfKP 204,120次元)
-    pub fn run(config: &LoopConfig) {
+    pub fn run(config: &LoopConfig) -> Result<(), String> {
         println!("============================================================");
         println!("=== TabulaShogi Autonomous Self-Improvement Loop (HalfKP) ===");
         println!(
@@ -148,6 +148,21 @@ impl SelfImprovementLoop {
         println!("Summary Log: {}", config.paths.summary_path);
         println!("============================================================");
 
+        // 実行に必要な親ディレクトリ群（data/, models/ 等）を自動作成し、クリーンワークツリーでの起動失敗を防止
+        for path_str in [
+            &config.paths.data_path,
+            &config.paths.deep_data_path,
+            &config.paths.best_model_path,
+            &config.paths.candidate_model_path,
+            &config.paths.candidate_ckpt_path,
+            &config.paths.summary_path,
+            &config.paths.state_path
+        ] {
+            if let Some(parent) = Path::new(path_str).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+
         // 0. パス重複チェック: best_model_path と candidate_model_path の衝突防止 (昇格ゲート無効化の完全防止)
         let best_canonical = Path::new(&config.paths.best_model_path)
             .canonicalize()
@@ -161,11 +176,12 @@ impl SelfImprovementLoop {
                 .best_model_path
                 .eq_ignore_ascii_case(&config.paths.candidate_model_path)
         {
-            eprintln!(
+            let err_msg = format!(
                 "[Fatal Error] best_model_path ('{}') and candidate_model_path ('{}') resolve to the same file! Aborting to protect champion model.",
                 config.paths.best_model_path, config.paths.candidate_model_path
             );
-            return;
+            eprintln!("{err_msg}");
+            return Err(err_msg);
         }
 
         // 初期モデルの確認 (HalfKPモデルが存在するか)
@@ -180,11 +196,12 @@ impl SelfImprovementLoop {
                     EvalMode::HalfKP(Arc::new(eval))
                 }
                 Err(e) => {
-                    eprintln!(
+                    let err_msg = format!(
                         "[Fatal Error] Failed to load existing best HalfKP model '{}': {e}. Aborting to prevent silent HCE fallback.",
                         config.paths.best_model_path
                     );
-                    return;
+                    eprintln!("{err_msg}");
+                    return Err(err_msg);
                 }
             }
         } else {
@@ -230,10 +247,11 @@ impl SelfImprovementLoop {
                 cur_gen,
                 gen_seed,
             ) {
-                eprintln!(
+                let err_msg = format!(
                     "[Fatal Error] Step 1 Self-play failed in Gen {cur_gen}: {e}. Aborting pipeline to prevent training on corrupt/incomplete data."
                 );
-                return;
+                eprintln!("{err_msg}");
+                return Err(err_msg);
             }
 
             // Step 2: データセット準備 & IIZ 深読み再評価
@@ -301,6 +319,7 @@ impl SelfImprovementLoop {
         println!("Autonomous Self-Improvement Session Completed!");
         println!("Best model preserved at: {}", config.paths.best_model_path);
         println!("============================================================");
+        Ok(())
     }
 
     /// Step 1: 自己対局データ生成 (Policy Mismatch / OOD 解消のため Champion 50% / Candidate 50% 混合)
@@ -627,6 +646,7 @@ impl SelfImprovementLoop {
                 elo1: 50.0,
                 alpha: 0.05,
                 beta: 0.05,
+                min_games: arena.min_promotion_games,
             }),
         };
 

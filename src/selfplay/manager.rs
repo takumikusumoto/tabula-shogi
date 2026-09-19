@@ -62,6 +62,9 @@ impl SelfPlayManager {
         let stats = Arc::new(Mutex::new(SelfPlayStats::default()));
 
         let csa_file = config.csa_output.as_ref().map(|path| {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             Arc::new(Mutex::new(
                 OpenOptions::new()
                     .create(true)
@@ -72,6 +75,9 @@ impl SelfPlayManager {
         });
 
         let data_file = config.data_output.as_ref().map(|path| {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             Arc::new(Mutex::new(
                 OpenOptions::new()
                     .create(true)

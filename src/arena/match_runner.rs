@@ -134,7 +134,7 @@ impl MatchRunner {
         println!("--------------------------------------");
 
         thread::scope(|s| {
-            for thread_id in 0..num_threads {
+            for _thread_id in 0..num_threads {
                 let pair_counter = Arc::clone(&pair_counter);
                 let finished_counter = Arc::clone(&finished_counter);
                 let early_stop_flag = Arc::clone(&early_stop_flag);
@@ -160,8 +160,7 @@ impl MatchRunner {
 
                         // ペア用の共通初期局面を生成
                         let seed = 0x9e3779b97f4a7c15u64
-                            .wrapping_add((p_idx as u64).wrapping_mul(0xbf58476d1ce4e5b9))
-                            .wrapping_add(thread_id as u64);
+                            .wrapping_add((p_idx as u64).wrapping_mul(0xbf58476d1ce4e5b9));
                         let initial_pos = Self::generate_opening_position(config.random_opening, seed);
 
                         // Game 1: Black = A, White = B

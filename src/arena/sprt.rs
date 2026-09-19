@@ -23,6 +23,8 @@ pub struct SprtConfig {
     pub alpha: f64,
     /// 第2種過誤確率 beta (偽陰性: 強いのに不合格と判定する確率)
     pub beta: f64,
+    /// 最低対局数 (Pass または Fail 判定を確定するまでの最小対局数)
+    pub min_games: usize,
 }
 
 impl Default for SprtConfig {
@@ -32,6 +34,7 @@ impl Default for SprtConfig {
             elo1: 10.0,
             alpha: 0.05,
             beta: 0.05,
+            min_games: 0,
         }
     }
 }
@@ -137,10 +140,15 @@ impl Sprt {
         let sum_diff = (w + 0.5 * d) - total * (p0 + p1) / 2.0;
         self.llr = (delta_p / var) * sum_diff;
 
-        if self.llr >= self.upper_bound {
-            self.status = SprtStatus::Pass;
-        } else if self.llr <= self.lower_bound {
-            self.status = SprtStatus::Fail;
+        // 最低対局数 min_games を満たしている場合のみ、Pass または Fail の確定判定を行う
+        if self.total_games() >= self.config.min_games {
+            if self.llr >= self.upper_bound {
+                self.status = SprtStatus::Pass;
+            } else if self.llr <= self.lower_bound {
+                self.status = SprtStatus::Fail;
+            } else {
+                self.status = SprtStatus::Continue;
+            }
         } else {
             self.status = SprtStatus::Continue;
         }
@@ -170,5 +178,34 @@ impl Sprt {
             return 1000.0;
         }
         -400.0 * (1.0 / wr - 1.0).log10()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sprt_min_games_gating() {
+        let config = SprtConfig {
+            elo0: 0.0,
+            elo1: 50.0,
+            alpha: 0.05,
+            beta: 0.05,
+            min_games: 20,
+        };
+
+        let mut sprt = Sprt::new(config);
+
+        // 6勝0敗: LLR は高いが min_games (20) 未満のため Continue を維持
+        sprt.record_batch(6, 0, 0);
+        assert_eq!(sprt.status, SprtStatus::Continue);
+        assert!(!sprt.is_decided());
+        assert!(sprt.llr > sprt.upper_bound);
+
+        // 追加で14勝 (計20局 >= 20): ここで初めて Pass へ遷移
+        sprt.record_batch(14, 0, 0);
+        assert_eq!(sprt.status, SprtStatus::Pass);
+        assert!(sprt.is_decided());
     }
 }

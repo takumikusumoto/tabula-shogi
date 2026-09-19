@@ -15,6 +15,7 @@ fn test_sprt_llr_calculation() {
         elo1: 10.0,
         alpha: 0.05,
         beta: 0.05,
+        min_games: 0,
     };
 
     // 1. 圧倒的に勝ち越した場合 (Pass 判定)
@@ -121,7 +122,7 @@ fn test_autonomous_loop_single_iteration() {
         },
     };
 
-    SelfImprovementLoop::run(&config);
+    assert!(SelfImprovementLoop::run(&config).is_ok());
 
     // データセットおよび候補モデルが正常生成されたことを確認
     assert!(

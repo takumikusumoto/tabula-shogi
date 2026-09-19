@@ -46,7 +46,7 @@ fn test_halfkp_autonomous_loop_single_iteration() {
         },
     };
 
-    SelfImprovementLoop::run(&config);
+    assert!(SelfImprovementLoop::run(&config).is_ok());
 
     // 1. 自己対局データセットが生成されていることを確認
     assert!(fs::metadata(&data_path).is_ok(), "Dataset must be created");
@@ -139,7 +139,7 @@ fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
         },
     };
 
-    SelfImprovementLoop::run(&config);
+    assert!(SelfImprovementLoop::run(&config).is_ok());
 
     // チェックポイントから復元されて学習が実行され、チェックポイントがさらに更新されたことを検証
     let continued_trainer = HalfKPTrainer::load_checkpoint(&cand_ckpt_path)
