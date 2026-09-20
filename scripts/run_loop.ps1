@@ -118,14 +118,16 @@ using System.Diagnostics;
 public class TabulaProcessTee : IDisposable {
     private StreamWriter _writer;
     private readonly object _lock = new object();
-    public TabulaProcessTee(string logPath) {
+    public TabulaProcessTee(Process proc, string logPath) {
         _writer = new StreamWriter(logPath, true, System.Text.Encoding.UTF8);
+        proc.OutputDataReceived += (s, e) => OnData(e.Data);
+        proc.ErrorDataReceived += (s, e) => OnData(e.Data);
     }
-    public void OnData(object sender, DataReceivedEventArgs e) {
-        if (e.Data != null) {
+    private void OnData(string data) {
+        if (data != null) {
             lock (_lock) {
-                Console.WriteLine(e.Data);
-                _writer.WriteLine(e.Data);
+                Console.WriteLine(data);
+                _writer.WriteLine(data);
                 _writer.Flush();
             }
         }
@@ -145,9 +147,7 @@ public class TabulaProcessTee : IDisposable {
 $proc = [System.Diagnostics.Process]::new()
 $proc.StartInfo = $psi
 
-$tee = [TabulaProcessTee]::new($runLog)
-$proc.OutputDataReceived += ($tee.OnData)
-$proc.ErrorDataReceived += ($tee.OnData)
+$tee = [TabulaProcessTee]::new($proc, $runLog)
 
 $proc.Start() | Out-Null
 $proc.BeginOutputReadLine()
