@@ -26,7 +26,7 @@ src/
 │   ├── evaluator.rs # 駒得, PST, 玉の囲い度, 手番ボーナス, 浮き駒ペナルティ
 │   ├── nnue.rs      # 完全スクラッチNNUE推論 & 16bit整数量子化シリアライザ
 │   ├── trainer.rs   # スクラッチNNUEバックプロパゲーション & Adamオプティマイザ
-│   ├── halfkp.rs    # HalfKP (204,120特徴量) アキュムレータ推論 & TABU_HK1シリアライザ
+│   ├── halfkp.rs    # HalfKP (204,120特徴量) アキュムレータ推論 & TABU_HK2シリアライザ
 │   ├── halfkp_trainer.rs # HalfKP スパース勾配 AdamW バックプロパゲーション学習器
 │   └── halfkp_stream_trainer.rs # メモリ上限500MB制約下でのストリーミング分割学習器
 ├── search/          # ゲーム木探索
@@ -256,7 +256,7 @@ flowchart LR
 - **Phase 4: スクラッチ NNUE 学習パイプライン（✅ 完了 / Residual Baseline 構造へ改定）**:
   - 外部機械学習ライブラリゼロのスクラッチ NNUE バックプロパゲーション学習器（`tabula-shogi train-nnue`）。
   - 駒割りベースライン残差モデル（Residual Baseline）＋ 2,520 次元スパース特徴量 ＋ 完全 Adam 最適化（隠れ層バイアス最適化含む）。
-  - 16bit 整数量子化バイナリシリアライザ（`TABU_NN4`、モデルサイズ 645 KB）。
+  - 16bit 整数量子化バイナリシリアライザ（`TABU_NN5`、モデルサイズ 645 KB）。
   - USI 動的切り替えオプション（`Eval_Type` / `NNUE_File`）と探索エンジンの統合。
 - **Phase 5: 自律的自己改善ループ & レーティング自動検定（✅ 完了）**:
   - 先後交代ペアマッチ並列アリーナ（`tabula-shogi match`）。

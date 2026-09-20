@@ -293,3 +293,12 @@ fn test_streaming_batch_reader() {
 
     let _ = std::fs::remove_file(test_path);
 }
+
+#[test]
+fn test_selfplay_config_use_book_default() {
+    let default_cfg = SelfPlayConfig::default();
+    assert!(
+        !default_cfg.use_book,
+        "SelfPlayConfig::default() must have use_book = false for Tabula Rasa"
+    );
+}

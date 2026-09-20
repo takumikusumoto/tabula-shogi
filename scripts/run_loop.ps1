@@ -2,6 +2,7 @@
 # TabulaShogi - HalfKP 自律改善ロングランループ起動スクリプト
 [CmdletBinding()]
 param(
+    [ValidatePattern('^[a-zA-Z0-9_\-]*$')]
     [string]$RunId = "",
     [int]$Iterations = 5,
     [int]$GamesPerIter = 1000,
@@ -109,21 +110,44 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 
+if (-not ([System.Management.Automation.PSTypeName]'TabulaProcessTee').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Diagnostics;
+public class TabulaProcessTee : IDisposable {
+    private StreamWriter _writer;
+    private readonly object _lock = new object();
+    public TabulaProcessTee(string logPath) {
+        _writer = new StreamWriter(logPath, true, System.Text.Encoding.UTF8);
+    }
+    public void OnData(object sender, DataReceivedEventArgs e) {
+        if (e.Data != null) {
+            lock (_lock) {
+                Console.WriteLine(e.Data);
+                _writer.WriteLine(e.Data);
+                _writer.Flush();
+            }
+        }
+    }
+    public void Dispose() {
+        lock (_lock) {
+            if (_writer != null) {
+                _writer.Dispose();
+                _writer = null;
+            }
+        }
+    }
+}
+"@
+}
+
 $proc = [System.Diagnostics.Process]::new()
 $proc.StartInfo = $psi
 
-$logStream = [System.IO.StreamWriter]::new($runLog, $true, [System.Text.Encoding]::UTF8)
-
-$outHandler = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $e)
-    if ($null -ne $e.Data) {
-        [Console]::WriteLine($e.Data)
-        $logStream.WriteLine($e.Data)
-        $logStream.Flush()
-    }
-}
-$proc.add_OutputDataReceived($outHandler)
-$proc.add_ErrorDataReceived($outHandler)
+$tee = [TabulaProcessTee]::new($runLog)
+$proc.OutputDataReceived += ($tee.OnData)
+$proc.ErrorDataReceived += ($tee.OnData)
 
 $proc.Start() | Out-Null
 $proc.BeginOutputReadLine()
@@ -140,20 +164,27 @@ try {
             if ($ws -gt $maxMemoryBytes) {
                 $memoryLimitExceeded = $true
                 $wsMb = [math]::Round($ws / 1MB, 2)
-                Write-Error "[FAIL-CLOSED] メモリ上限超過: ${wsMb} MB > 500 MB。プロセスを即時強制終了します。"
-                $proc.Kill()
+                try {
+                    $proc.Kill()
+                } catch {}
+                Write-Host "[FAIL-CLOSED] メモリ上限超過: ${wsMb} MB > 500 MB。プロセスを即時強制終了しました。" -ForegroundColor Red
                 break
             }
-        } catch {
+        } catch [System.InvalidOperationException] {
+            # プロセスが終了していた場合は監視ループを正常終了
             break
+        } catch {
+            try { $proc.Kill() } catch {}
+            throw
         }
     }
 } finally {
     $proc.WaitForExit()
-    $logStream.Dispose()
+    $tee.Dispose()
 }
 
 if ($memoryLimitExceeded) {
+    Write-Error "[FAIL-CLOSED] メモリ上限（500MB）を超過したため自律ループを強制終了しました。"
     exit 1
 }
 if ($proc.ExitCode -ne 0) {

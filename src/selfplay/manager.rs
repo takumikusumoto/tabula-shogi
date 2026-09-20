@@ -99,6 +99,7 @@ impl SelfPlayManager {
             let handle = thread::spawn(move || {
                 let mut engine =
                     SearchEngine::new(cfg.tt_size_mb).with_eval_mode(cfg.eval_mode.clone());
+                engine.use_book = cfg.use_book;
                 loop {
                     let game_idx = counter.fetch_add(1, Ordering::SeqCst);
                     if game_idx >= num_games {
