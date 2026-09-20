@@ -123,6 +123,7 @@ fn generate_selfplay_data(cfg: &SprintConfig) -> (Vec<DatasetEntry>, std::time::
         seed: 0x9E3779B97F4A7C15,
         eval_mode: EvalMode::Hce,
         temperature_plies: 24,
+        use_book: false,
         start_game_id: 0,
     };
 

@@ -39,6 +39,7 @@ impl Default for PartitionConfig {
                 seed: 0x9E3779B97F4A7C15,
                 eval_mode: crate::eval::EvalMode::Hce,
                 temperature_plies: 24,
+                use_book: false,
                 start_game_id: 0,
             },
         }

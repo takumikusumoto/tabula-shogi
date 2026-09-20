@@ -185,7 +185,8 @@ fn test_halfkp_loop_promotion_gate_blocks_small_samples() {
         &mut current_best,
         &best_path,
         20,
-    );
+    )
+    .expect("handle_promotion should succeed");
 
     assert!(
         !promoted,
@@ -232,7 +233,8 @@ fn test_halfkp_loop_promotion_gate_permits_when_threshold_met() {
         &mut current_best,
         &best_path,
         20,
-    );
+    )
+    .expect("handle_promotion should succeed");
 
     assert!(
         promoted,

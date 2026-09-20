@@ -27,6 +27,8 @@ pub struct SelfPlayConfig {
     pub temperature_plies: usize,
     /// 対局IDの開始オフセット (分割生成時のシード一意性を保証)
     pub start_game_id: usize,
+    /// 内蔵定跡木を参照するか否か (白紙自律強化学習時はfalseで純粋自己生成を担保)
+    pub use_book: bool,
 }
 
 impl Default for SelfPlayConfig {
@@ -45,6 +47,7 @@ impl Default for SelfPlayConfig {
             eval_mode: crate::eval::EvalMode::Hce,
             temperature_plies: 24,
             start_game_id: 0,
+            use_book: false,
         }
     }
 }

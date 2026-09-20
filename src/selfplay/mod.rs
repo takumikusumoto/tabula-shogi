@@ -77,6 +77,12 @@ pub fn run_cli(args: &[String]) {
                     i += 1;
                 }
             }
+            "--use-book" => {
+                config.use_book = true;
+            }
+            "--no-book" => {
+                config.use_book = false;
+            }
             "--help" | "-h" => {
                 print_help();
                 return;
@@ -105,6 +111,8 @@ OPTIONS:
         --data <PATH>         Path to append training dataset (TSV) [default: none]
         --tt-size <MB>        Transposition table size in MB [default: 16]
         --seed <SEED>         Pseudo-random number generator seed
+        --use-book            Probe built-in opening book during opening plies [default: disabled for Tabula Rasa]
+        --no-book             Explicitly disable built-in opening book
     -h, --help                Print this help message
 "#
     );

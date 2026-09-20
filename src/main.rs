@@ -226,18 +226,40 @@ fn parse_eval_mode(desc: &str) -> (String, tabula_shogi::eval::EvalMode) {
                 tabula_shogi::eval::NNUEEvaluator::new(),
             )),
         )
+    } else if desc.eq_ignore_ascii_case("halfkp") {
+        (
+            "HalfKP(built-in)".to_string(),
+            tabula_shogi::eval::EvalMode::HalfKP(std::sync::Arc::new(
+                tabula_shogi::eval::HalfKPEvaluator::new(),
+            )),
+        )
     } else {
-        match tabula_shogi::eval::NNUEEvaluator::load_from_file(desc) {
-            Ok(nnue) => (
+        let path = std::path::Path::new(desc);
+        if !path.exists() {
+            eprintln!("Error: Evaluation model file '{desc}' does not exist (fail-closed).");
+            std::process::exit(1);
+        }
+
+        // 1. Try HalfKP
+        match tabula_shogi::eval::HalfKPEvaluator::load_from_file(desc) {
+            Ok(halfkp) => (
                 desc.to_string(),
-                tabula_shogi::eval::EvalMode::Nnue(std::sync::Arc::new(nnue)),
+                tabula_shogi::eval::EvalMode::HalfKP(std::sync::Arc::new(halfkp)),
             ),
-            Err(e) => {
-                eprintln!("Warning: Failed to load NNUE file '{desc}' ({e}). Falling back to HCE.");
-                (
-                    "HCE(fallback)".to_string(),
-                    tabula_shogi::eval::EvalMode::Hce,
-                )
+            Err(e_hkp) => {
+                // 2. Try NNUE
+                match tabula_shogi::eval::NNUEEvaluator::load_from_file(desc) {
+                    Ok(nnue) => (
+                        desc.to_string(),
+                        tabula_shogi::eval::EvalMode::Nnue(std::sync::Arc::new(nnue)),
+                    ),
+                    Err(e_nnue) => {
+                        eprintln!(
+                            "Error: Failed to load evaluation model from '{desc}'. Neither HalfKP ({e_hkp}) nor NNUE ({e_nnue}) could be loaded. Aborting (fail-closed)."
+                        );
+                        std::process::exit(1);
+                    }
+                }
             }
         }
     }
@@ -251,23 +273,23 @@ fn run_match(args: &[String]) {
         println!("TabulaShogi Arena Match");
         println!("USAGE:\n    tabula-shogi match [OPTIONS]");
         println!("OPTIONS:");
-        println!("    --engine1 <HCE|NNUE|PATH>   First engine model [default: HCE]");
-        println!("    --engine2 <HCE|NNUE|PATH>   Second engine model [default: NNUE]");
+        println!("    --engine1 <HCE|NNUE|HALFKP|PATH>   First engine model [default: HCE]");
+        println!("    --engine2 <HCE|NNUE|HALFKP|PATH>   Second engine model [default: HalfKP]");
         println!(
-            "    -p, --pairs <N>             Number of game pairs [default: 20] (total = 2*pairs)"
+            "    -p, --pairs <N>                    Number of game pairs [default: 20] (total = 2*pairs)"
         );
-        println!("    -d, --depth <D>             Search depth [default: 2]");
-        println!("    -t, --threads <T>           Worker threads [default: 2]");
-        println!("    -o, --opening <K>           Random opening plies [default: 6]");
+        println!("    -d, --depth <D>                    Search depth [default: 2]");
+        println!("    -t, --threads <T>                  Worker threads [default: 2]");
+        println!("    -o, --opening <K>                  Random opening plies [default: 6]");
         return;
     }
 
     let engine1_desc = parser
-        .get_string("--engine1", Some("-e1"))
+        .get_value("--engine1", None)
         .unwrap_or_else(|| "HCE".to_string());
     let engine2_desc = parser
-        .get_string("--engine2", Some("-e2"))
-        .unwrap_or_else(|| "NNUE".to_string());
+        .get_value("--engine2", None)
+        .unwrap_or_else(|| "HalfKP".to_string());
     let pairs = parser.get_value("--pairs", Some("-p")).unwrap_or(20);
     let depth = parser.get_value("--depth", Some("-d")).unwrap_or(2);
     let threads = parser.get_value("--threads", Some("-t")).unwrap_or(2);

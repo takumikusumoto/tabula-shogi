@@ -137,15 +137,19 @@ impl GameRunner {
 
             // 4. 着手の決定
             let (chosen_move, score) = if pos.ply <= config.temperature_plies {
-                // 序盤の多様性確保: まず定跡ツリーから確率サンプリング
-                let book_sample = OpeningBook::probe_sample(&pos, rng.next_u64() as u32);
+                // 序盤の多様性確保: config.use_book が有効な場合のみ定跡ツリーから確率サンプリング (白紙自律強化学習時は無効化)
+                let book_sample = if config.use_book {
+                    OpeningBook::probe_sample(&pos, rng.next_u64() as u32)
+                } else {
+                    None
+                };
                 if let Some(bm) = book_sample
                     && legal_moves.contains(&bm)
                 {
                     let eval = engine.evaluate(&pos);
                     (bm, eval)
                 } else {
-                    // 定跡外の場合は温度付きソフトマックスサンプリング (ボルツマン探査)
+                    // 定跡無効または定跡外の場合は温度付きソフトマックスサンプリング (ボルツマン探査)
                     // 1〜10手目: T = 1.0 (有力手の中で柔軟に分岐)
                     // 11〜temperature_plies: T = 0.6 (上位2〜3手の最善手筋に絞って揺らぐ)
                     let temp = if pos.ply <= 10 { 1.0 } else { 0.6 };

@@ -276,7 +276,7 @@ impl SelfImprovementLoop {
                     gen_seed,
                     &mut dataset,
                     &current_best_eval,
-                );
+                )?;
 
             // Step 4: アリーナ対戦 & SPRT 検定
             let match_res = Self::run_arena_and_sprt(
@@ -294,7 +294,7 @@ impl SelfImprovementLoop {
                 &mut current_best_eval,
                 &config.paths.best_model_path,
                 config.arena.min_promotion_games,
-            );
+            )?;
 
             // Step 6: サマリ記録 & 世代更新
             let metrics = GenerationMetrics {
@@ -312,7 +312,7 @@ impl SelfImprovementLoop {
                 &metrics,
                 &match_res,
                 promoted,
-            );
+            )?;
         }
 
         println!("\n============================================================");
@@ -481,7 +481,7 @@ impl SelfImprovementLoop {
         gen_seed: u64,
         dataset: &mut [DatasetEntry],
         current_best_eval: &EvalMode,
-    ) -> (HalfKPEvaluator, f32, f32, f32) {
+    ) -> Result<(HalfKPEvaluator, f32, f32, f32), String> {
         println!(
             "Sampled {} training positions (50% recent / 50% history). Training HalfKP for {} epochs (batch_size: {})...",
             dataset.len(),
@@ -602,23 +602,33 @@ impl SelfImprovementLoop {
         );
 
         let cand_eval = trainer.to_evaluator();
-        if let Err(e) = cand_eval.save_to_file(&paths.candidate_model_path) {
-            eprintln!("Error saving candidate model: {e}");
-        }
+        cand_eval
+            .save_to_file(&paths.candidate_model_path)
+            .map_err(|e| {
+                format!(
+                    "Failed to save candidate model to '{}': {e}",
+                    paths.candidate_model_path
+                )
+            })?;
 
-        if let Err(e) = trainer.save_checkpoint(&paths.candidate_ckpt_path) {
-            eprintln!("Error saving candidate checkpoint: {e}");
-        }
+        trainer
+            .save_checkpoint(&paths.candidate_ckpt_path)
+            .map_err(|e| {
+                format!(
+                    "Failed to save candidate checkpoint to '{}': {e}",
+                    paths.candidate_ckpt_path
+                )
+            })?;
 
         println!("[Memory] Dropping HalfKPTrainer to reclaim ~314MB heap before arena matches...");
         drop(trainer);
 
-        (
+        Ok((
             cand_eval,
             init_loss.mse_loss,
             final_loss.mse_loss,
             reduction,
-        )
+        ))
     }
 
     /// Step 4: アリーナ対戦 & SPRT 検定 (動的延長対局)
@@ -684,7 +694,7 @@ impl SelfImprovementLoop {
         metrics: &GenerationMetrics,
         match_res: &MatchResult,
         promoted: bool,
-    ) {
+    ) -> Result<(), String> {
         let champ_name = match current_best_eval {
             EvalMode::HalfKP(_) => "HalfKP",
             EvalMode::Nnue(_) => "NNUE",
@@ -712,12 +722,15 @@ impl SelfImprovementLoop {
             match_res.elo_diff_a,
             &sprt_str,
             promoted,
-        );
+        )?;
 
         // 世代番号を永続化（次回再起動時に自動で直前世代から継続可能）
-        if let Err(e) = std::fs::write(&paths.state_path, cur_gen.to_string()) {
-            eprintln!("Warning: Failed to persist generation state: {e}");
-        }
+        std::fs::write(&paths.state_path, cur_gen.to_string()).map_err(|e| {
+            format!(
+                "Failed to persist generation state to '{}': {e}",
+                paths.state_path
+            )
+        })?;
 
         if promoted {
             println!(
@@ -735,6 +748,8 @@ impl SelfImprovementLoop {
                 cur_gen + 1
             );
         }
+
+        Ok(())
     }
 
     pub fn handle_promotion(
@@ -744,7 +759,7 @@ impl SelfImprovementLoop {
         current_best_eval: &mut EvalMode,
         best_model_path: &str,
         min_promotion_games: usize,
-    ) -> bool {
+    ) -> Result<bool, String> {
         // 昇格条件:
         // 1. SPRT が Pass (統計的有意に強い)
         // 2. 最低 min_promotion_games (通常20対局以上) を消化していること (小標本による偶発的早期誤昇格を完全防止)
@@ -770,16 +785,22 @@ impl SelfImprovementLoop {
                 match_res.elo_diff_a
             );
             if let Some(parent) = Path::new(best_model_path).parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!(
+                        "Failed to create parent directory for best model '{}': {e}",
+                        best_model_path
+                    )
+                })?;
             }
-            if let Err(e) = candidate_eval.save_to_file(best_model_path) {
-                eprintln!("Error writing promoted best model: {e}");
-                false
-            } else {
-                *current_best_eval = EvalMode::HalfKP(Arc::new(candidate_eval.clone()));
-                println!("Successfully promoted and updated '{}'!", best_model_path);
-                true
-            }
+            candidate_eval.save_to_file(best_model_path).map_err(|e| {
+                format!(
+                    "Failed to write promoted best model to '{}': {e}",
+                    best_model_path
+                )
+            })?;
+            *current_best_eval = EvalMode::HalfKP(Arc::new(candidate_eval.clone()));
+            println!("Successfully promoted and updated '{}'!", best_model_path);
+            Ok(true)
         } else {
             if sprt_passed && !min_games_met {
                 println!(
@@ -794,7 +815,7 @@ impl SelfImprovementLoop {
                     match_res.elo_diff_a
                 );
             }
-            false
+            Ok(false)
         }
     }
 
@@ -814,31 +835,40 @@ impl SelfImprovementLoop {
         elo_diff: f64,
         sprt_status: &str,
         promoted: bool,
-    ) {
+    ) -> Result<(), String> {
         if let Some(parent) = Path::new(summary_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create parent directory for summary CSV '{}': {e}",
+                    summary_path
+                )
+            })?;
         }
         let file_exists = Path::new(summary_path).exists();
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(summary_path)
-        {
-            use std::io::Write;
-            if !file_exists {
-                let _ = writeln!(
-                    file,
-                    "generation,timestamp,champion_mode,duration_secs,dataset_size,relabel_count,init_mse,final_mse,reduction_pct,match_games,win_rate,elo_diff,sprt_status,promoted"
-                );
-            }
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let _ = writeln!(
+            .map_err(|e| format!("Failed to open summary CSV '{}': {e}", summary_path))?;
+
+        use std::io::Write;
+        if !file_exists {
+            writeln!(
                 file,
-                "{generation},{timestamp},{champ_mode},{duration_secs:.2},{dataset_size},{relabel_count},{init_mse:.6},{final_mse:.6},{reduction_pct:.2},{match_games},{win_rate:.4},{elo_diff:+.1},{sprt_status},{promoted}"
-            );
+                "generation,timestamp,champion_mode,duration_secs,dataset_size,relabel_count,init_mse,final_mse,reduction_pct,match_games,win_rate,elo_diff,sprt_status,promoted"
+            )
+            .map_err(|e| format!("Failed to write header to summary CSV '{}': {e}", summary_path))?;
         }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        writeln!(
+            file,
+            "{generation},{timestamp},{champ_mode},{duration_secs:.2},{dataset_size},{relabel_count},{init_mse:.6},{final_mse:.6},{reduction_pct:.2},{match_games},{win_rate:.4},{elo_diff:+.1},{sprt_status},{promoted}"
+        )
+        .map_err(|e| format!("Failed to write row to summary CSV '{}': {e}", summary_path))?;
+
+        Ok(())
     }
 }

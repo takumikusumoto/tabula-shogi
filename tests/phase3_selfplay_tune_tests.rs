@@ -108,6 +108,7 @@ fn test_selfplay_single_game_simulation() {
         seed: 12345,
         eval_mode: tabula_shogi::eval::EvalMode::Hce,
         temperature_plies: 2,
+        use_book: false,
         start_game_id: 0,
     };
 
@@ -141,6 +142,7 @@ fn test_selfplay_manager_small_batch() {
         seed: 99999,
         eval_mode: tabula_shogi::eval::EvalMode::Hce,
         temperature_plies: 2,
+        use_book: false,
         start_game_id: 0,
     };
 

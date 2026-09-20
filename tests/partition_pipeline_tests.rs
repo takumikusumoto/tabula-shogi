@@ -31,6 +31,7 @@ fn test_partitioned_selfplay_generation_and_resume() {
             seed: 0x12345678,
             eval_mode: tabula_shogi::eval::EvalMode::Hce,
             temperature_plies: 4,
+            use_book: false,
             start_game_id: 0,
         },
     };
@@ -255,6 +256,7 @@ fn test_partitioned_selfplay_resume_config_mismatch_invalidation() {
             seed: 0x11111111,
             eval_mode: tabula_shogi::eval::EvalMode::Hce,
             temperature_plies: 4,
+            use_book: false,
             start_game_id: 0,
         },
     };

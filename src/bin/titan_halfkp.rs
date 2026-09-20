@@ -155,6 +155,7 @@ fn run_generate(args: &[String]) -> bool {
             seed,
             eval_mode,
             temperature_plies: 24,
+            use_book: false,
             start_game_id: 0,
         },
     };
