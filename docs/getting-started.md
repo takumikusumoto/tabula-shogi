@@ -55,7 +55,8 @@ cargo build --release
 | :--- | :---: | :---: | :---: | :--- |
 | **USI_Hash** | spin | 64 | 1 〜 8192 MB | 置換表（探索結果のメモリキャッシュ）のサイズ。PCの搭載メモリに応じて 256 や 1024 に増やすと読みが安定します。 |
 | **Threads** | spin | 1 | 1 〜 64 | 探索に使用する並列スレッド数（Lazy SMP）。対局時は 2〜8、ベンチマーク時は 1 を推奨。 |
-| **Eval_Type** | combo | HCE | HCE / NNUE | 評価関数の種類。HCE（手動評価関数）または NNUE（ニューラルネット）を選択。 |
+| **Eval_Type** | combo | HalfKP | HalfKP / HCE / NNUE | 評価関数の種類。HalfKP（スパースNNUE）、HCE（手動評価関数）、NNUE（小型残差NNUE）を選択。 |
+| **HalfKP_File** | string | models/best_halfkp.bin | ファイルパス | HalfKP 評価重みバイナリのパス。存在する場合、自動読み込みされます。 |
 | **NNUE_File** | string | <empty> | ファイルパス | 外部の量子化 NNUE 重みバイナリ（`nnue.bin`）のパス。指定するとモデルが即座に読み込まれます。 |
 
 ---
@@ -120,11 +121,14 @@ TabulaShogi は、スタンドアロン CLI ツールとして自己対局・機
 
 ### 6.5 完全自律型自己改善ループ (`loop`)
 
-「自己対局 ➜ 学習データ蓄積 ➜ スクラッチNNUE学習 ➜ アリーナ対決検定 ➜ 勝ち越し時の自動昇格」の進化サイクルを完全自動で指定世代数繰り返します：
+「自己対局 ➜ IIZ深読み蒸留 ➜ HalfKP学習 ➜ アリーナ対決検定 ➜ 勝ち越し時の自動昇格」の進化サイクルを完全自動で指定世代数繰り返します：
 
 ```bash
-# 3世代の自律改善ループを実行（1世代あたり50局自己対局、15ペア検定、深さ2、4スレッド）
-.\target\release\tabula-shogi.exe loop --iterations 3 --games 50 --eval-pairs 15 --threads 4 --depth 2 --epochs 10 --best best_nnue.bin
+# 5世代の自律改善ループを実行（1世代あたり1000局自己対局、20ペア検定、深さ2、6スレッド）
+.\target\release\tabula-shogi.exe loop --iterations 5 --games 1000 --eval-pairs 20 --threads 6 --depth 2 --min-games 20
+
+# またはPowerShellランチャースクリプトを使用
+pwsh scripts/run_loop.ps1 -Iterations 5 -GamesPerIter 1000 -Threads 6
 ```
 
 ### 6.6 探索ベンチマークの測定 (`bench`)

@@ -9,7 +9,7 @@
 
 - **完全スクラッチ＆白紙からの自己進化（Tabula Rasa Philosophy）**:
   - やねうら王、Apery、Stockfish等の外部OSSコードや探索ルーチンの流用は一切行っていません。
-  - 外部の学習済みNNUE重みファイル等に依存せず、ゼロベースで設計された駒得・Piece-Square Tables (PST)・玉の安全度・大局観（HCE）およびスクラッチ Residual Baseline NNUE 評価ネットワーク（2520入力 ➜ 128隠れ層 ClippedReLU ➜ 駒割りベースライン残差推論 TABU_NN4、16bit整数量子化）を採用。
+  - 外部の学習済み重みファイル等に依存せず、ゼロベースで設計された駒得・Piece-Square Tables (PST)・玉の安全度・大局観（HCE）に加え、本格的な **HalfKP ニューラルネットワーク評価関数**（204,120 スパース特徴行 × 128 隠れ層 ClippedReLU、約2,613万重みパラメータ、IIZ 多重反復雑巾絞り蒸留、スパース AdamW ストリーミング学習）およびスクラッチ Residual Baseline NNUE を完全内蔵。
   - 自己対局生成データを用いたバックプロパゲーション＆Adamオプティマイザによる強化学習・評価関数自己進化パイプラインを完全内蔵。
 - **超高速・堅牢なRust実装**:
   - 外部クレート依存ゼロ（Zero External Dependencies）。標準ライブラリのみで完結。
@@ -31,7 +31,7 @@
 - **USIプロトコル完全準拠**:
   - リアルタイムな `info depth ... score cp ... nodes ... nps ... pv ...` の標準出力により、ShogiHome等のGUIで読み筋や評価値グラフ、消費時間がグラフィカルに表示されます。
   - `btime`, `wtime`, `byoyomi`, `binc`, `winc` に対応した安全な時間管理（Time Manager）。
-  - `Eval_Type` (HCE / NNUE) や `NNUE_File` オプションによる動的評価エンジン切り替えに対応。
+  - `Eval_Type` (HalfKP / HCE / NNUE)、`HalfKP_File`、`NNUE_File` オプションによる動的評価エンジン切り替えに対応。
 
 ---
 
@@ -75,8 +75,11 @@ tabula-shogi train-nnue --data train.tsv --out nnue.bin --epochs 20 --lr 0.001
 # 5. アリーナ対戦＆SPRT検定（2モデル間の先後ペア並列対戦と勝率・Elo差測定）
 tabula-shogi match --engine1 hce --engine2 nnue.bin --pairs 20 --threads 4 --depth 2
 
-# 6. 完全自律型自己改善ループ（自己対局 ➜ 学習 ➜ 検定 ➜ 自動昇格）
-tabula-shogi loop --iterations 3 --games 50 --eval-pairs 15 --threads 4 --depth 2
+# 6. 完全自律型自己改善ループ（自己対局 ➜ IIZ深読み蒸留 ➜ HalfKP学習 ➜ アリーナ検定 ➜ 自動昇格）
+tabula-shogi loop --iterations 5 --games 1000 --eval-pairs 20 --threads 6 --depth 2 --min-games 20
+
+# または専用ランチャースクリプトを使用
+pwsh scripts/run_loop.ps1 -Iterations 5 -GamesPerIter 1000 -Threads 6
 
 # 7. 探索ベンチマークの実行
 tabula-shogi bench
@@ -104,7 +107,8 @@ tabula-shogi bench
 | `isready` | エンジンの初期化完了を確認し、`readyok` を返答 |
 | `setoption name USI_Hash value <N>` | 置換表（Transposition Table）のメモリサイズ（MB単位）を設定 |
 | `setoption name Threads value <N>` | 並列探索スレッド数を設定 (1〜64) |
-| `setoption name Eval_Type value <HCE\|NNUE>` | 評価関数モードを切り替え (HCE: 手動評価関数, NNUE: ニューラルネット) |
+| `setoption name Eval_Type value <HalfKP\|HCE\|NNUE>` | 評価関数モードを切り替え (HalfKP: スパースNNUE, HCE: 手動評価関数, NNUE: 小型残差NNUE) |
+| `setoption name HalfKP_File value <PATH>` | HalfKP評価重みバイナリ (`models/best_halfkp.bin`) を読み込み |
 | `setoption name NNUE_File value <PATH>` | 外部量子化NNUE重みバイナリ (`nnue.bin`) を読み込み |
 | `usinewgame` | 新規対局開始に伴う置換表および局面履歴のクリア |
 | `position [startpos \| sfen <SFEN>] moves ...` | 盤面局面のセットおよび着手履歴の適用 |
@@ -118,7 +122,7 @@ tabula-shogi bench
 ## テストと品質管理
 
 ```bash
-# 単体テストの実行（ルール適合、打ち歩詰め、二歩、王手回避、探索等の全テスト）
+# 単体テストの実行（ルール適合、打ち歩詰め、二歩、王手回避、HalfKP、探索等の全テスト）
 cargo test
 
 # 静的解析リンターの実行

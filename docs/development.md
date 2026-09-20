@@ -31,7 +31,7 @@ TabulaShogi は **「外部のモデル・重み・定跡・棋譜を一切持�
 コミット前に必ず以下のコマンドを実行し、エラーや警告がゼロであることを確認してください：
 
 ```bash
-# 全テストスイート（全32件の統合・機能回帰テスト）の実行
+# 全テストスイート（全84件の統合・機能回帰テスト）の実行
 cargo test
 
 # 静的解析リンターの実行（警告はエラーとして扱う）
@@ -41,12 +41,18 @@ cargo clippy -- -D warnings
 cargo fmt -- --check
 ```
 
-### テストスイート構成（全32件）
+### テストスイート構成（全84件）
 
-1. **`tests/integration_tests.rs` (16件)**: 基本将棋ルール、王手回避生成、二歩・打ち歩詰め判定、反復深化・PVS探索、置換表（TT）、SEE駒得オーダリング、df-pn詰将棋探索、USI通信プロトコル。
-2. **`tests/phase3_selfplay_tune_tests.rs` (7件)**: 自己対局生成、CSA形式棋譜シリアライズ、SFEN変換往復性、Texel Tuning（Adam）損失収束テスト。
-3. **`tests/phase4_nnue_tests.rs` (5件)**: スクラッチNNUEバックプロパゲーション学習器、16bit整数量子化、モデルバイナリ（`TABU_NN1`）読み書き往復性、USIオプション動的切り替え。
-4. **`tests/phase5_loop_tests.rs` (4件)**: アリーナ先後ペア対戦、ランダム序盤局面生成、SPRT（逐次確率比検定）対数尤度比計算、自律的自己改善ループ（`LoopPipeline`）統合テスト。
+1. **`src/lib.rs` (1件)**: SPRT最小対局数（`min_games`）ゲーティング境界値テスト。
+2. **`tests/integration_tests.rs` (22件)**: 基本将棋ルール、王手回避生成、二歩・打ち歩詰め判定、反復深化・PVS探索、置換表（TT）、SEE駒得オーダリング、df-pn詰将棋探索、USI通信プロトコル、HalfKP USIオプション切り替え・探索エンドツーエンド検証。
+3. **`tests/halfkp_tests.rs` (9件)**: HalfKP (204,120特徴量) アキュムレータ初期化・次元検証、指し手差分更新（do_move/undo_move）のビット完全一致性、探索エンジン統合、モデルシリアライズ（`TABU_HK1`）往復性・境界値テスト。
+4. **`tests/halfkp_trainer_tests.rs` (9件)**: HalfKP スパース勾配 AdamW バックプロパゲーション学習器、損失収束、スパース勾配厳密性、チェックポイント（`candidate_halfkp_ckpt.bin`）保存・復元往復性。
+5. **`tests/halfkp_loop_tests.rs` (5件)**: HalfKP 完全自律改善ループ（自己対局 ➜ IIZ深読み蒸留 ➜ HalfKP学習 ➜ アリーナ対決検定 ➜ 自動昇格）、SPRT昇格ゲート、メモリ解放とチェックポイント継続性検証。
+6. **`tests/partition_pipeline_tests.rs` (6件)**: 巨大データセットの安全な分割・ストリーミング処理パイプライン、メモリ上限500MB制約下のチャンク分割学習、チェックポイントアトミック保存。
+7. **`tests/phase3_selfplay_tune_tests.rs` (11件)**: 自己対局生成、CSA形式棋譜シリアライズ、SFEN変換往復性、Texel Tuning（Adam）損失収束テスト、深読み再評価（`relabel_deep`）。
+8. **`tests/phase4_nnue_tests.rs` (12件)**: スクラッチNNUEバックプロパゲーション学習器、16bit整数量子化、モデルバイナリ（`TABU_NN4`）読み書き往復性、USIオプション動的切り替え、残差ベースライン境界保証。
+9. **`tests/phase5_loop_tests.rs` (4件)**: アリーナ先後ペア対戦、ランダム序盤局面生成、SPRT（逐次確率比検定）対数尤度比計算、自律的自己改善ループ（`LoopPipeline`）統合テスト。
+10. **`tests/search_regression_tests.rs` (5件)**: 固定深さ探索アボート時の静的評価値フォールバック、安全玉攻撃検出、深さ情報追跡、定跡ツリーゼロ手上書き防止回帰テスト。
 
 ※ 本リポジトリには Pre-commit Gitフックが設定されており、コミット時に `cargo fmt -- --check` および `markdownlint-cli2` による静的検証が自動実行されます。
 
@@ -74,10 +80,14 @@ cargo fmt -- --check
   - Adamオプティマイザによる評価パラメータ自己最適化（`tabula-shogi tune` / Texel Tuning）ループの構築。
 - **Phase 4: 自己対局生成データによるスクラッチNNUE学習＆強化学習（完了）**
   - 自己対局データを用いたゼロ外部依存のスクラッチNNUEバックプロパゲーション学習器（`tabula-shogi train-nnue`）。
-  - 16bit整数量子化（355 KB）・高速SIMD親和バイナリシリアライザ (`TABU_NN1`)。
+  - 16bit整数量子化・残差ベースラインモデル (`TABU_NN4`)。
   - USI動的切り替え（`Eval_Type` / `NNUE_File`）および探索エンジンへのシームレスな統合。
 - **Phase 5: 自律的自己改善ループ & レーティング自動検定（完了）**
   - 先後交代ペア並列対戦アリーナ（`tabula-shogi match`）。
   - Wald の逐次確率比検定（SPRT）ソルバーによる統計的有意性の判定。
   - 自己対局 ➜ データ蓄積 ➜ NNUE 学習 ➜ アリーナ対決 ➜ モデル自動昇格（`tabula-shogi loop`）の完全自律パイプライン化。
+- **Phase 6: 大規模自律自己学習と HalfKP 重みの実戦育成（★現在進行中）**
+  - 204,120 特徴量・26.13M 重みの本格 HalfKP アーキテクチャへの進化。
+  - メモリ上限 500MB 制約下でのチャンク分割ストリーミング学習（`HalfKpStreamTrainer`）と IIZ 深読み蒸留。
+  - 1世代あたり 1,000 局規模の自律改善ループの長時間稼働。
 - **次のマイルストーン: 自律強化学習による「プロ越えレベル」の達成（当面の目標）**

@@ -10,4 +10,5 @@
 *.err
 loop_state.txt
 *.bak
+*.csv
 archive/
