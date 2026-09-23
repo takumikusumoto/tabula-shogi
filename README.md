@@ -81,7 +81,10 @@ tabula-shogi loop --iterations 5 --games 1000 --eval-pairs 20 --threads 6 --dept
 # または専用ランチャースクリプトを使用
 pwsh scripts/run_loop.ps1 -Iterations 5 -GamesPerIter 1000 -Threads 6
 
-# 7. 探索ベンチマークの実行
+# 7. float AdamWチェックポイントから有倍率TABU_HK2モデルを再エクスポート
+tabula-shogi export-halfkp --checkpoint models/candidate_halfkp_ckpt.bin --out models/candidate_halfkp.bin --samples 512
+
+# 8. 探索ベンチマークの実行
 tabula-shogi bench
 ```
 

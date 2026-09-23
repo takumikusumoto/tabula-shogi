@@ -359,7 +359,14 @@ impl SelfImprovementLoop {
 
         // 候補モデル（Candidate HalfKP）による探査自己対局（存在する場合）
         let candidate_eval_opt = if Path::new(&paths.candidate_model_path).exists() {
-            HalfKPEvaluator::load_from_file(&paths.candidate_model_path).ok()
+            Some(
+                HalfKPEvaluator::load_from_file(&paths.candidate_model_path).map_err(|e| {
+                    format!(
+                        "Failed to load existing candidate HalfKP model '{}' (fail-closed): {e}",
+                        paths.candidate_model_path
+                    )
+                })?,
+            )
         } else {
             None
         };
@@ -648,6 +655,7 @@ impl SelfImprovementLoop {
             pairs: current_pairs,
             depth: arena.depth,
             threads: arena.threads,
+            generation: cur_gen,
             random_opening: 6,
             max_plies: 320,
             tt_size_mb: 16,

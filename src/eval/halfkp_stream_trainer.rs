@@ -22,7 +22,7 @@ pub struct StreamTrainConfig {
     pub checkpoint_interval_batches: usize,
     /// AdamW 状態チェックポイント保存先パス
     pub checkpoint_path: Option<String>,
-    /// 量子化推論モデルバイナリ (TABU_HKP) 保存先パス
+    /// 有倍率固定小数点推論モデルバイナリ (TABU_HK2) 保存先パス
     pub model_output_path: String,
     /// 既存チェックポイントが存在する場合に自動再開するか
     pub resume_from_checkpoint: bool,

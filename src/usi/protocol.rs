@@ -36,7 +36,12 @@ impl UsiHandler {
         let initial_eval = if Path::new(&halfkp_path).exists() {
             match HalfKPEvaluator::load_from_file(&halfkp_path) {
                 Ok(hkp) => crate::eval::EvalMode::HalfKP(Arc::new(hkp)),
-                Err(_) => crate::eval::EvalMode::Hce,
+                Err(e) => {
+                    eprintln!(
+                        "Error loading default HalfKP file '{halfkp_path}': {e}. Starting in HCE mode (fail-closed)."
+                    );
+                    crate::eval::EvalMode::Hce
+                }
             }
         } else {
             crate::eval::EvalMode::Hce
@@ -106,19 +111,31 @@ impl UsiHandler {
                     self.threads = t.clamp(1, 64);
                 } else if name.eq_ignore_ascii_case("eval_type") {
                     if value.eq_ignore_ascii_case("halfkp") {
-                        let eval = if Path::new(&self.halfkp_path).exists() {
+                        if Path::new(&self.halfkp_path).exists() {
                             match HalfKPEvaluator::load_from_file(&self.halfkp_path) {
-                                Ok(h) => Arc::new(h),
-                                Err(_) => Arc::new(HalfKPEvaluator::new()),
+                                Ok(h) => {
+                                    self.engine.eval_mode =
+                                        crate::eval::EvalMode::HalfKP(Arc::new(h));
+                                    println!(
+                                        "info string Evaluation mode switched to HalfKP ({})",
+                                        self.halfkp_path
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "Error loading HalfKP file '{}': {e}. Evaluation mode unchanged (fail-closed).",
+                                        self.halfkp_path
+                                    );
+                                }
                             }
                         } else {
-                            Arc::new(HalfKPEvaluator::new())
-                        };
-                        self.engine.eval_mode = crate::eval::EvalMode::HalfKP(eval);
-                        println!(
-                            "info string Evaluation mode switched to HalfKP ({})",
-                            self.halfkp_path
-                        );
+                            self.engine.eval_mode =
+                                crate::eval::EvalMode::HalfKP(Arc::new(HalfKPEvaluator::new()));
+                            println!(
+                                "info string Evaluation mode switched to built-in HalfKP (no file at {})",
+                                self.halfkp_path
+                            );
+                        }
                     } else if value.eq_ignore_ascii_case("nnue") {
                         let eval = if Path::new(&self.nnue_path).exists() {
                             match NNUEEvaluator::load_from_file(&self.nnue_path) {

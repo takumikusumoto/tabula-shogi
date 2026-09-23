@@ -93,6 +93,76 @@ fn test_dataset_entry_format_and_parse() {
     assert_eq!(entry, parsed);
 }
 
+fn two_ply_record(result: GameResult) -> GameRecord {
+    let pos = Position::startpos();
+    GameRecord {
+        game_id: 99,
+        plies: vec![
+            PlyRecord {
+                ply: 1,
+                sfen: pos.to_sfen(),
+                side_to_move: Color::Black,
+                mv: Move::normal(Square::new(6, 6), Square::new(6, 5), false),
+                score: 12,
+            },
+            PlyRecord {
+                ply: 2,
+                sfen: pos.to_sfen(),
+                side_to_move: Color::White,
+                mv: Move::normal(Square::new(2, 2), Square::new(2, 3), false),
+                score: -12,
+            }
+        ],
+        result,
+        total_plies: 2,
+    }
+}
+
+#[test]
+fn test_dataset_retains_max_plies_draw_as_half_result() {
+    let pos = Position::startpos();
+    let sfen = pos.to_sfen();
+    let plies = (1..=256)
+        .map(|ply| PlyRecord {
+            ply,
+            sfen: sfen.clone(),
+            side_to_move: if ply % 2 == 1 {
+                Color::Black
+            } else {
+                Color::White
+            },
+            mv: Move::normal(Square::new(6, 6), Square::new(6, 5), false),
+            score: 0,
+        })
+        .collect();
+    let game = GameRecord {
+        game_id: 256,
+        plies,
+        result: GameResult::Draw(DrawReason::MaxPliesExceeded),
+        total_plies: 256,
+    };
+    let entries = DatasetHandler::extract_entries_checked(&game, 1)
+        .expect("a structurally valid maximum-plies draw must be retained");
+
+    assert_eq!(entries.len(), 256);
+    assert!(entries.iter().all(|entry| entry.result == 0.5));
+}
+
+#[test]
+fn test_dataset_keeps_normal_draw_distinct_and_rejects_invalid_record() {
+    let ordinary_draw = two_ply_record(GameResult::Draw(DrawReason::Sennichite));
+    let entries = DatasetHandler::extract_entries_checked(&ordinary_draw, 1)
+        .expect("an ordinary draw must remain valid");
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| entry.result == 0.5));
+
+    let mut invalid = two_ply_record(GameResult::Draw(DrawReason::MaxPliesExceeded));
+    invalid.total_plies = 3;
+    let error = DatasetHandler::extract_entries_checked(&invalid, 1)
+        .expect_err("a malformed record must not be relabelled as a draw");
+    assert!(error.contains("total_plies"));
+}
+
 #[test]
 fn test_selfplay_single_game_simulation() {
     let config = SelfPlayConfig {

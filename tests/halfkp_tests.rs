@@ -1,5 +1,8 @@
 use tabula_shogi::board::Position;
-use tabula_shogi::eval::halfkp::{HALFKP_HIDDEN_SIZE, HALFKP_INPUT_SIZE, HalfKPEvaluator};
+use tabula_shogi::eval::halfkp::{
+    HALFKP_ACTIVATION_MAX, HALFKP_BIAS_SCALE, HALFKP_FEATURE_SCALE, HALFKP_HIDDEN_SIZE,
+    HALFKP_INPUT_SIZE, HALFKP_MAGIC, HALFKP_OUTPUT_DIVISOR, HALFKP_OUTPUT_SCALE, HalfKPEvaluator,
+};
 use tabula_shogi::movegen::MoveGenerator;
 use tabula_shogi::selfplay::game::SimpleRng;
 use tabula_shogi::types::Move;
@@ -12,8 +15,34 @@ fn test_halfkp_initialization_and_dimensions() {
     assert_eq!(eval.output_weights.len(), HALFKP_HIDDEN_SIZE * 2);
 
     for b in &eval.feature_biases {
-        assert_eq!(*b, 32, "Initial hidden biases must be 32");
+        assert_eq!(
+            *b,
+            (32 * HALFKP_FEATURE_SCALE) as i16,
+            "Initial hidden biases must encode float 32.0 in Q6"
+        );
     }
+}
+
+#[test]
+fn test_halfkp_fixed_point_units_and_overflow_bounds() {
+    assert_eq!(
+        HALFKP_BIAS_SCALE,
+        HALFKP_FEATURE_SCALE * HALFKP_OUTPUT_SCALE
+    );
+    assert_eq!(HALFKP_ACTIVATION_MAX, 64 * HALFKP_FEATURE_SCALE);
+    assert_eq!(HALFKP_OUTPUT_DIVISOR, 128 * HALFKP_BIAS_SCALE as i64);
+
+    // Even a structurally malformed position that fills all 81 squares and all 14 hand
+    // categories to the extraction cap (18) cannot overflow the i32 accumulator.
+    let maximum_extracted_features = 81i64 + 14 * 18;
+    let maximum_accumulator = (maximum_extracted_features + 1) * i16::MAX as i64;
+    assert!(maximum_accumulator < i32::MAX as i64);
+
+    // The worst possible clipped 256-way dot product plus i32 bias fits comfortably in i64.
+    let maximum_output =
+        HALFKP_ACTIVATION_MAX as i64 * i16::MAX as i64 * (HALFKP_HIDDEN_SIZE * 2) as i64
+            + i32::MAX as i64;
+    assert!(maximum_output < i64::MAX);
 }
 
 #[test]
@@ -112,6 +141,9 @@ fn test_halfkp_roundtrip_serialization() {
     eval.save_to_file(test_path)
         .expect("Failed to save HalfKP binary");
 
+    let header = std::fs::read(test_path).expect("read saved model header");
+    assert_eq!(&header[..8], HALFKP_MAGIC);
+
     let loaded = HalfKPEvaluator::load_from_file(test_path).expect("Failed to load HalfKP binary");
 
     assert_eq!(loaded.feature_biases, eval.feature_biases);
@@ -126,6 +158,19 @@ fn test_halfkp_roundtrip_serialization() {
     );
 
     let _ = std::fs::remove_file(test_path);
+}
+
+#[test]
+fn test_halfkp_legacy_format_is_rejected_explicitly() {
+    let legacy_path = "target/test_legacy_halfkp.bin";
+    std::fs::write(legacy_path, b"TABU_HKP").expect("write legacy header fixture");
+
+    let error = HalfKPEvaluator::load_from_file(legacy_path)
+        .expect_err("legacy unscaled weights must never be interpreted as Q6/Q9 weights");
+    let _ = std::fs::remove_file(legacy_path);
+
+    assert!(error.contains("Legacy HalfKP format TABU_HKP"));
+    assert!(error.contains("export-halfkp"));
 }
 
 #[test]

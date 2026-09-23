@@ -17,6 +17,8 @@ pub struct MatchConfig {
     pub pairs: usize,
     pub depth: u8,
     pub threads: usize,
+    /// Generation namespace for deterministic, generation-varying opening seeds.
+    pub generation: usize,
     pub random_opening: usize,
     pub max_plies: usize,
     pub tt_size_mb: usize,
@@ -33,6 +35,7 @@ impl Default for MatchConfig {
             pairs: 20,
             depth: 2,
             threads: 1,
+            generation: 0,
             random_opening: 6,
             max_plies: 320,
             tt_size_mb: 16,
@@ -159,8 +162,7 @@ impl MatchRunner {
                         }
 
                         // ペア用の共通初期局面を生成
-                        let seed = 0x9e3779b97f4a7c15u64
-                            .wrapping_add((p_idx as u64).wrapping_mul(0xbf58476d1ce4e5b9));
+                        let seed = Self::opening_seed(config.generation, p_idx);
                         let initial_pos = Self::generate_opening_position(config.random_opening, seed);
 
                         // Game 1: Black = A, White = B
@@ -287,6 +289,18 @@ impl MatchRunner {
             elo_diff_a,
             sprt: final_sprt,
         }
+    }
+
+    /// Deterministic seed namespace for one generation/pair.
+    /// Both color-swapped games in a pair consume the same generated position.
+    pub fn opening_seed(generation: usize, pair_index: usize) -> u64 {
+        let mut z = 0x9e3779b97f4a7c15u64
+            ^ (generation as u64).wrapping_mul(0x517cc1b727220a95)
+            ^ (pair_index as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+        // SplitMix64 finalizer prevents adjacent generations/pairs from sharing correlated seeds.
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
     }
 
     /// 共通のランダム序盤局面を生成

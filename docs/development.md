@@ -45,13 +45,13 @@ cargo fmt -- --check
 
 1. **`src/lib.rs` (1件)**: SPRT最小対局数（`min_games`）ゲーティング境界値テスト。
 2. **`tests/integration_tests.rs` (22件)**: 基本将棋ルール、王手回避生成、二歩・打ち歩詰め判定、反復深化・PVS探索、置換表（TT）、SEE駒得オーダリング、df-pn詰将棋探索、USI通信プロトコル、HalfKP USIオプション切り替え・探索エンドツーエンド検証。
-3. **`tests/halfkp_tests.rs` (9件)**: HalfKP (204,120特徴量) アキュムレータ初期化・次元検証、指し手差分更新（do_move/undo_move）のビット完全一致性、探索エンジン統合、モデルシリアライズ（`TABU_HK1`）往復性・境界値テスト。
-4. **`tests/halfkp_trainer_tests.rs` (9件)**: HalfKP スパース勾配 AdamW バックプロパゲーション学習器、損失収束、スパース勾配厳密性、チェックポイント（`candidate_halfkp_ckpt.bin`）保存・復元往復性。
+3. **`tests/halfkp_tests.rs`**: HalfKP (204,120特徴量) アキュムレータ初期化・差分更新のビット完全一致性、固定小数点の単位・オーバーフロー境界、`TABU_HK2` 往復性、旧 `TABU_HKP` 明示拒否を検証。
+4. **`tests/halfkp_trainer_tests.rs`**: HalfKP スパース AdamW、損失収束、Q6/Q9量子化後の float/int 評価誤差、微小更新の生存、チェックポイント保存・復元を検証。
 5. **`tests/halfkp_loop_tests.rs` (5件)**: HalfKP 完全自律改善ループ（自己対局 ➜ IIZ深読み蒸留 ➜ HalfKP学習 ➜ アリーナ対決検定 ➜ 自動昇格）、SPRT昇格ゲート、メモリ解放とチェックポイント継続性検証。
 6. **`tests/partition_pipeline_tests.rs` (6件)**: 巨大データセットの安全な分割・ストリーミング処理パイプライン、メモリ上限500MB制約下のチャンク分割学習、チェックポイントアトミック保存。
-7. **`tests/phase3_selfplay_tune_tests.rs` (11件)**: 自己対局生成、CSA形式棋譜シリアライズ、SFEN変換往復性、Texel Tuning（Adam）損失収束テスト、深読み再評価（`relabel_deep`）。
+7. **`tests/phase3_selfplay_tune_tests.rs`**: 自己対局生成、最大手数引分の0.5ラベル保持、不正GameRecord拒否、CSA/SFEN、Texel Tuning、深読み再評価を検証。
 8. **`tests/phase4_nnue_tests.rs` (12件)**: スクラッチNNUEバックプロパゲーション学習器、16bit整数量子化、モデルバイナリ（`TABU_NN4`）読み書き往復性、USIオプション動的切り替え、残差ベースライン境界保証。
-9. **`tests/phase5_loop_tests.rs` (4件)**: アリーナ先後ペア対戦、ランダム序盤局面生成、SPRT（逐次確率比検定）対数尤度比計算、自律的自己改善ループ（`LoopPipeline`）統合テスト。
+9. **`tests/phase5_loop_tests.rs`**: アリーナ先後ペア対戦、世代別かつ決定的なランダム序盤シード、SPRT、自律的自己改善ループ統合を検証。
 10. **`tests/search_regression_tests.rs` (5件)**: 固定深さ探索アボート時の静的評価値フォールバック、安全玉攻撃検出、深さ情報追跡、定跡ツリーゼロ手上書き防止回帰テスト。
 
 ※ 本リポジトリには Pre-commit Gitフックが設定されており、コミット時に `cargo fmt -- --check` および `markdownlint-cli2` による静的検証が自動実行されます。

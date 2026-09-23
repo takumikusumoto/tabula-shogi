@@ -55,9 +55,24 @@ fn test_sprt_llr_calculation() {
 
 #[test]
 fn test_arena_opening_generation() {
-    let pos = MatchRunner::generate_opening_position(6, 42);
+    let seed = MatchRunner::opening_seed(42, 3);
+    assert_eq!(seed, MatchRunner::opening_seed(42, 3));
+    assert_ne!(seed, MatchRunner::opening_seed(43, 3));
+    assert_ne!(seed, MatchRunner::opening_seed(42, 4));
+
+    let pos = MatchRunner::generate_opening_position(6, seed);
+    let rerun = MatchRunner::generate_opening_position(6, MatchRunner::opening_seed(42, 3));
     assert_eq!(pos.board.len(), 81);
     assert!(!pos.is_in_check(pos.side_to_move));
+    assert_eq!(pos.to_sfen(), rerun.to_sfen());
+
+    let next_generation =
+        MatchRunner::generate_opening_position(6, MatchRunner::opening_seed(43, 3));
+    assert_ne!(
+        pos.to_sfen(),
+        next_generation.to_sfen(),
+        "the same pair index must receive a different opening in a different generation"
+    );
 }
 
 #[test]
@@ -71,6 +86,7 @@ fn test_arena_pair_match() {
         pairs: 2, // 2ペア = 4局
         depth: 1,
         threads: 2,
+        generation: 7,
         random_opening: 4,
         max_plies: 40,
         tt_size_mb: 8,

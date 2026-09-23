@@ -536,4 +536,36 @@ mod tests {
         let _ = std::fs::remove_file(&custom_model_path);
         let _ = std::fs::remove_file(format!("{custom_model_path}.bak"));
     }
+
+    #[test]
+    fn test_usi_rejects_legacy_halfkp_without_changing_mode() {
+        use tabula_shogi::usi::UsiCommand;
+        use tabula_shogi::usi::protocol::UsiHandler;
+
+        let legacy_path = std::env::temp_dir()
+            .join(format!("test_legacy_halfkp_{}.bin", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        std::fs::write(&legacy_path, b"TABU_HKP").expect("write legacy model fixture");
+
+        let mut handler = UsiHandler::new();
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "HCE".to_string(),
+        });
+        handler.process_command(UsiCommand::SetOption {
+            name: "halfkp_file".to_string(),
+            value: legacy_path.clone(),
+        });
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "HalfKP".to_string(),
+        });
+
+        assert!(
+            matches!(handler.eval_mode(), tabula_shogi::eval::EvalMode::Hce),
+            "invalid legacy model must not be replaced with a fresh HalfKP evaluator"
+        );
+        let _ = std::fs::remove_file(legacy_path);
+    }
 }

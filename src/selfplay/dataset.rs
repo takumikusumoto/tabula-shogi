@@ -18,12 +18,31 @@ impl DatasetHandler {
     /// 1対局の記録から学習用レコード群を抽出
     /// (序盤のランダム手はノイズを避けるため除外し、探索が行われた局面のみを抽出)
     pub fn extract_entries(game: &GameRecord, min_ply: usize) -> Vec<DatasetEntry> {
-        // 手数超過（打ち切り引き分け）は優劣が不明瞭なまま打ち切られるため、
-        // 学習ラベルの汚染を防ぐためデータセットから除外
-        if let super::game::GameResult::Draw(super::game::DrawReason::MaxPliesExceeded) =
-            game.result
-        {
-            return Vec::new();
+        Self::extract_entries_checked(game, min_ply).unwrap_or_default()
+    }
+
+    /// `GameRecord` の構造整合性を確認してから学習用レコード群を抽出する。
+    ///
+    /// `GameResult` は通常引分と最大手数引分を型で区別しており、どちらも 0.5 として
+    /// 保持する。一方、破損した記録（手数とレコード数の不一致）は引分に読み替えず拒否する。
+    pub fn extract_entries_checked(
+        game: &GameRecord,
+        min_ply: usize,
+    ) -> Result<Vec<DatasetEntry>, String> {
+        if game.total_plies != game.plies.len() {
+            return Err(format!(
+                "Invalid game record {}: total_plies={} but ply records={}",
+                game.game_id,
+                game.total_plies,
+                game.plies.len()
+            ));
+        }
+
+        if game.plies.windows(2).any(|pair| pair[0].ply >= pair[1].ply) {
+            return Err(format!(
+                "Invalid game record {}: ply numbers are not strictly increasing",
+                game.game_id
+            ));
         }
 
         let mut entries = Vec::with_capacity(game.plies.len());
@@ -48,7 +67,7 @@ impl DatasetHandler {
             });
         }
 
-        entries
+        Ok(entries)
     }
 
     /// TSV形式の1行にシリアライズ

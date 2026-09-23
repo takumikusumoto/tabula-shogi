@@ -140,7 +140,18 @@ impl SelfPlayManager {
                     // データセット書き出し (エラー検知・伝播)
                     if let Some(ref lock) = data_lock {
                         let entries: Vec<DatasetEntry> =
-                            DatasetHandler::extract_entries(&record, cfg.random_opening_plies + 1);
+                            match DatasetHandler::extract_entries_checked(
+                                &record,
+                                cfg.random_opening_plies + 1,
+                            ) {
+                                Ok(entries) => entries,
+                                Err(e) => {
+                                    eprintln!("\n[Error] Dataset record validation failed: {e}");
+                                    let mut s = stats_lock.lock().unwrap();
+                                    s.io_errors += 1;
+                                    Vec::new()
+                                }
+                            };
                         let mut file = lock.lock().unwrap();
                         let mut write_err = false;
                         for entry in entries {

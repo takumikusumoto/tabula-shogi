@@ -9,7 +9,21 @@ pub const HALFKP_HIDDEN_SIZE: usize = 128;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_ADDEND: u64 = 1;
 
-pub const HALFKP_MAGIC: &[u8; 8] = b"TABU_HKP";
+/// Q6 feature weights, Q9 output weights, and their product-scale output bias.
+///
+/// The fixed-point forward pass uses these units:
+/// - accumulator/activation: `float * 64`
+/// - output weight: `float * 512`
+/// - output sum/bias: `float * 64 * 512`
+pub const HALFKP_FEATURE_SCALE: i32 = 64;
+pub const HALFKP_OUTPUT_SCALE: i32 = 512;
+pub const HALFKP_BIAS_SCALE: i32 = HALFKP_FEATURE_SCALE * HALFKP_OUTPUT_SCALE;
+pub const HALFKP_ACTIVATION_MAX: i32 = 64 * HALFKP_FEATURE_SCALE;
+pub const HALFKP_OUTPUT_DIVISOR: i64 =
+    128 * HALFKP_FEATURE_SCALE as i64 * HALFKP_OUTPUT_SCALE as i64;
+
+pub const HALFKP_MAGIC: &[u8; 8] = b"TABU_HK2";
+pub const HALFKP_LEGACY_MAGIC: &[u8; 8] = b"TABU_HKP";
 pub const MAX_EVAL_CP: i32 = 27_000;
 pub const RESIDUAL_BOUND_CP: i32 = 25_000;
 
@@ -67,21 +81,40 @@ impl Default for HalfKPEvaluator {
 }
 
 impl HalfKPEvaluator {
+    #[inline(always)]
+    pub(crate) fn initial_feature_weight(feat: usize, hidden: usize) -> i16 {
+        let h = ((feat as u64)
+            .wrapping_mul(LCG_MULTIPLIER)
+            .wrapping_add((hidden as u64).wrapping_mul(0x9e3779b97f4a7c15))
+            .wrapping_add(LCG_ADDEND)
+            >> 33) as i32;
+        (((h % 3) - 1) * HALFKP_FEATURE_SCALE) as i16
+    }
+
+    #[inline]
+    fn quantize_i16(value: f32, scale: i32) -> i16 {
+        (value * scale as f32)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    }
+
+    #[inline]
+    fn quantize_i32(value: f32, scale: i32) -> i32 {
+        (value * scale as f32)
+            .round()
+            .clamp(i32::MIN as f32, i32::MAX as f32) as i32
+    }
+
     /// 決定論的サンプリングによる初期化
     pub fn new() -> Self {
         let mut feature_weights = vec![[0i16; HALFKP_HIDDEN_SIZE]; HALFKP_INPUT_SIZE];
-        let feature_biases = [32i16; HALFKP_HIDDEN_SIZE];
+        let feature_biases = [(32 * HALFKP_FEATURE_SCALE) as i16; HALFKP_HIDDEN_SIZE];
         let output_weights = [0i16; HALFKP_HIDDEN_SIZE * 2];
         let output_bias = 0i32;
 
         for (feat, weights_slice) in feature_weights.iter_mut().enumerate() {
             for (i, w) in weights_slice.iter_mut().enumerate() {
-                let h = ((feat as u64)
-                    .wrapping_mul(LCG_MULTIPLIER)
-                    .wrapping_add((i as u64).wrapping_mul(0x9e3779b97f4a7c15))
-                    .wrapping_add(LCG_ADDEND)
-                    >> 33) as i32;
-                *w = ((h % 3) - 1) as i16;
+                *w = Self::initial_feature_weight(feat, i);
             }
         }
 
@@ -104,22 +137,22 @@ impl HalfKPEvaluator {
         for row in feature_weights {
             let mut q_row = [0i16; HALFKP_HIDDEN_SIZE];
             for (w, &f) in q_row.iter_mut().zip(row.iter()) {
-                *w = f.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                *w = Self::quantize_i16(f, HALFKP_FEATURE_SCALE);
             }
             quantized_feats.push(q_row);
         }
 
         let mut quantized_biases = [0i16; HALFKP_HIDDEN_SIZE];
         for (b, &f) in quantized_biases.iter_mut().zip(feature_biases.iter()) {
-            *b = f.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            *b = Self::quantize_i16(f, HALFKP_FEATURE_SCALE);
         }
 
         let mut quantized_out = [0i16; HALFKP_HIDDEN_SIZE * 2];
         for (w, &f) in quantized_out.iter_mut().zip(output_weights.iter()) {
-            *w = f.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            *w = Self::quantize_i16(f, HALFKP_OUTPUT_SCALE);
         }
 
-        let quantized_out_bias = output_bias.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+        let quantized_out_bias = Self::quantize_i32(output_bias, HALFKP_BIAS_SCALE);
 
         HalfKPEvaluator {
             feature_weights: quantized_feats,
@@ -475,7 +508,7 @@ impl HalfKPEvaluator {
         }
     }
 
-    /// アキュムレータを用いた高速局面評価 (ClippedReLU 0..=64 & 純粋スカラー評価)
+    /// アキュムレータを用いた高速局面評価 (Q6 ClippedReLU 0..=4096)
     pub fn evaluate_with_accumulator(&self, pos: &Position, acc: &HalfKPAccumulator) -> i32 {
         let (mover_acc, opp_acc) = match pos.side_to_move {
             Color::Black => (&acc.accumulation[0], &acc.accumulation[1]),
@@ -484,13 +517,20 @@ impl HalfKPEvaluator {
 
         let mut output = self.output_bias as i64;
         for i in 0..HALFKP_HIDDEN_SIZE {
-            let m_val = mover_acc[i].clamp(0, 64) as i64;
-            let o_val = opp_acc[i].clamp(0, 64) as i64;
+            let m_val = mover_acc[i].clamp(0, HALFKP_ACTIVATION_MAX) as i64;
+            let o_val = opp_acc[i].clamp(0, HALFKP_ACTIVATION_MAX) as i64;
             output += m_val * (self.output_weights[i] as i64);
             output += o_val * (self.output_weights[HALFKP_HIDDEN_SIZE + i] as i64);
         }
 
-        let raw_cp = (output / 128) as i32;
+        // Symmetric round-to-nearest keeps the final integer score within 0.5 cp of
+        // the fixed-point value (Rust's signed division otherwise truncates to zero).
+        let rounded_cp = if output >= 0 {
+            (output + HALFKP_OUTPUT_DIVISOR / 2) / HALFKP_OUTPUT_DIVISOR
+        } else {
+            -((-output + HALFKP_OUTPUT_DIVISOR / 2) / HALFKP_OUTPUT_DIVISOR)
+        };
+        let raw_cp = rounded_cp as i32;
         raw_cp.clamp(-MAX_EVAL_CP, MAX_EVAL_CP)
     }
 
@@ -500,7 +540,7 @@ impl HalfKPEvaluator {
         self.evaluate_with_accumulator(pos, &acc)
     }
 
-    /// バイナリファイルへ安全にアトミック保存 (TABU_HKP)
+    /// バイナリファイルへ安全にアトミック保存 (TABU_HK2)
     /// 52MBのメモリ一括確保を完全排除し、一時ファイルへのBufWriter逐次書き出しとアトミックリネームで既存ファイルを保護
     pub fn save_to_file(&self, path: &str) -> io::Result<()> {
         if let Some(parent) = std::path::Path::new(path).parent() {
@@ -555,6 +595,15 @@ impl HalfKPEvaluator {
     pub fn load_from_file(path: &str) -> Result<Self, String> {
         let bytes =
             std::fs::read(path).map_err(|e| format!("Failed to read HalfKP file '{path}': {e}"))?;
+        if bytes.len() >= HALFKP_LEGACY_MAGIC.len()
+            && &bytes[..HALFKP_LEGACY_MAGIC.len()] == HALFKP_LEGACY_MAGIC
+        {
+            return Err(
+                "Legacy HalfKP format TABU_HKP is not supported by the scaled evaluator; re-export the original float checkpoint with `tabula-shogi export-halfkp`"
+                    .to_string(),
+            );
+        }
+
         let expected_len = 16
             + HALFKP_INPUT_SIZE * HALFKP_HIDDEN_SIZE * 2
             + HALFKP_HIDDEN_SIZE * 2
@@ -568,7 +617,10 @@ impl HalfKPEvaluator {
             ));
         }
         if &bytes[0..8] != HALFKP_MAGIC {
-            return Err("Invalid HalfKP magic header".to_string());
+            return Err(format!(
+                "Invalid HalfKP magic header: expected {}",
+                String::from_utf8_lossy(HALFKP_MAGIC)
+            ));
         }
         let in_size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let hid_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;

@@ -1,4 +1,7 @@
-use super::halfkp::{HALFKP_HIDDEN_SIZE, HALFKP_INPUT_SIZE, HalfKPEvaluator, MAX_EVAL_CP};
+use super::halfkp::{
+    HALFKP_BIAS_SCALE, HALFKP_FEATURE_SCALE, HALFKP_HIDDEN_SIZE, HALFKP_INPUT_SIZE,
+    HALFKP_OUTPUT_SCALE, HalfKPEvaluator, MAX_EVAL_CP,
+};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
@@ -11,6 +14,22 @@ pub struct TrainStepLoss {
     pub range_loss: f32,
     /// 総損失 (mse_loss + range_loss)
     pub total_loss: f32,
+}
+
+/// Export-time evidence that fractional training updates survived fixed-point quantization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalfKPQuantizationStats {
+    pub feature_values: usize,
+    pub float_nonzero_features: usize,
+    pub quantized_nonzero_features: usize,
+    pub float_changed_from_initial: usize,
+    pub legacy_changed_from_initial: usize,
+    pub scaled_changed_from_initial: usize,
+    pub feature_saturations: usize,
+    pub output_nonzero: usize,
+    pub output_saturations: usize,
+    pub feature_bias_saturations: usize,
+    pub output_bias_saturated: bool,
 }
 
 impl TrainStepLoss {
@@ -28,7 +47,7 @@ impl TrainStepLoss {
 /// - 隠れ層: 128 (先手128 + 後手128 = 256次元結合)
 /// - 最適化手法: スパース AdamW (PyTorch SparseAdam 準拠のローカル更新ステップ)
 /// - 活性化関数: ClippedReLU (0.0..=64.0)
-/// - 評価値スケール: Evaluator と完全一致 (output / 128 = cp)
+/// - 評価値スケール: Float は output / 128、Evaluator は同値な Q6×Q9 固定小数点
 pub struct HalfKPTrainer {
     pub feature_weights: Vec<[f32; HALFKP_HIDDEN_SIZE]>,
     pub feature_biases: [f32; HALFKP_HIDDEN_SIZE],
@@ -96,22 +115,22 @@ impl HalfKPTrainer {
         for row in &eval.feature_weights {
             let mut f_row = [0.0f32; HALFKP_HIDDEN_SIZE];
             for (w, &q) in f_row.iter_mut().zip(row.iter()) {
-                *w = q as f32;
+                *w = q as f32 / HALFKP_FEATURE_SCALE as f32;
             }
             feature_weights.push(f_row);
         }
 
         let mut feature_biases = [0.0f32; HALFKP_HIDDEN_SIZE];
         for (b, &q) in feature_biases.iter_mut().zip(eval.feature_biases.iter()) {
-            *b = q as f32;
+            *b = q as f32 / HALFKP_FEATURE_SCALE as f32;
         }
 
         let mut output_weights = [0.0f32; HALFKP_HIDDEN_SIZE * 2];
         for (w, &q) in output_weights.iter_mut().zip(eval.output_weights.iter()) {
-            *w = q as f32;
+            *w = q as f32 / HALFKP_OUTPUT_SCALE as f32;
         }
 
-        let output_bias = eval.output_bias as f32;
+        let output_bias = eval.output_bias as f32 / HALFKP_BIAS_SCALE as f32;
 
         HalfKPTrainer {
             feature_weights,
@@ -134,41 +153,75 @@ impl HalfKPTrainer {
 
     /// 学習済み Trainer から推論用 HalfKPEvaluator へエクスポート
     pub fn to_evaluator(&self) -> HalfKPEvaluator {
-        let mut eval = HalfKPEvaluator {
-            feature_weights: Vec::with_capacity(HALFKP_INPUT_SIZE),
-            feature_biases: [0i16; HALFKP_HIDDEN_SIZE],
-            output_weights: [0i16; HALFKP_HIDDEN_SIZE * 2],
-            output_bias: self
-                .output_bias
-                .round()
-                .clamp(i32::MIN as f32, i32::MAX as f32) as i32,
+        HalfKPEvaluator::from_float_weights(
+            &self.feature_weights,
+            &self.feature_biases,
+            &self.output_weights,
+            self.output_bias,
+        )
+    }
+
+    /// Quantization survival/saturation statistics for an evaluator exported from this trainer.
+    pub fn quantization_stats(&self, eval: &HalfKPEvaluator) -> HalfKPQuantizationStats {
+        let mut stats = HalfKPQuantizationStats {
+            feature_values: HALFKP_INPUT_SIZE * HALFKP_HIDDEN_SIZE,
+            float_nonzero_features: 0,
+            quantized_nonzero_features: 0,
+            float_changed_from_initial: 0,
+            legacy_changed_from_initial: 0,
+            scaled_changed_from_initial: 0,
+            feature_saturations: 0,
+            output_nonzero: 0,
+            output_saturations: 0,
+            feature_bias_saturations: 0,
+            output_bias_saturated: false,
         };
 
-        for row in &self.feature_weights {
-            let mut i_row = [0i16; HALFKP_HIDDEN_SIZE];
-            for (dest, &src) in i_row.iter_mut().zip(row.iter()) {
-                *dest = src.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        for (feat, (float_row, quantized_row)) in self
+            .feature_weights
+            .iter()
+            .zip(eval.feature_weights.iter())
+            .enumerate()
+        {
+            for (hidden, (&float_weight, &quantized_weight)) in
+                float_row.iter().zip(quantized_row.iter()).enumerate()
+            {
+                let initial_quantized = HalfKPEvaluator::initial_feature_weight(feat, hidden);
+                let initial_float = initial_quantized as f32 / HALFKP_FEATURE_SCALE as f32;
+                stats.float_nonzero_features += usize::from(float_weight != 0.0);
+                stats.quantized_nonzero_features += usize::from(quantized_weight != 0);
+                stats.float_changed_from_initial +=
+                    usize::from((float_weight - initial_float).abs() > 1.0e-6);
+                stats.legacy_changed_from_initial += usize::from(
+                    float_weight.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                        != initial_float as i16,
+                );
+                stats.scaled_changed_from_initial +=
+                    usize::from(quantized_weight != initial_quantized);
+                let scaled = float_weight * HALFKP_FEATURE_SCALE as f32;
+                stats.feature_saturations +=
+                    usize::from(scaled < i16::MIN as f32 || scaled > i16::MAX as f32);
             }
-            eval.feature_weights.push(i_row);
         }
 
-        for (dest, &src) in eval
-            .feature_biases
-            .iter_mut()
-            .zip(self.feature_biases.iter())
+        for (&float_weight, &quantized_weight) in
+            self.output_weights.iter().zip(eval.output_weights.iter())
         {
-            *dest = src.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            stats.output_nonzero += usize::from(quantized_weight != 0);
+            let scaled = float_weight * HALFKP_OUTPUT_SCALE as f32;
+            stats.output_saturations +=
+                usize::from(scaled < i16::MIN as f32 || scaled > i16::MAX as f32);
         }
-
-        for (dest, &src) in eval
-            .output_weights
-            .iter_mut()
-            .zip(self.output_weights.iter())
-        {
-            *dest = src.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        for &bias in &self.feature_biases {
+            let scaled = bias * HALFKP_FEATURE_SCALE as f32;
+            stats.feature_bias_saturations +=
+                usize::from(scaled < i16::MIN as f32 || scaled > i16::MAX as f32);
         }
+        let scaled_bias = self.output_bias * HALFKP_BIAS_SCALE as f32;
+        stats.output_bias_saturated =
+            scaled_bias < i32::MIN as f32 || scaled_bias > i32::MAX as f32;
 
-        eval
+        stats
     }
 
     /// フォワードパス (Mover-first 手番視点)

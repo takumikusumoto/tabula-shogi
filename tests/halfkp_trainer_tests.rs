@@ -2,6 +2,8 @@ use std::sync::Arc;
 use tabula_shogi::board::Position;
 use tabula_shogi::eval::halfkp::{HALFKP_HIDDEN_SIZE, HALFKP_INPUT_SIZE, HalfKPEvaluator};
 use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
+use tabula_shogi::movegen::MoveGenerator;
+use tabula_shogi::selfplay::game::SimpleRng;
 use tabula_shogi::types::Color;
 
 #[test]
@@ -113,40 +115,79 @@ fn test_halfkp_trainer_sparse_gradient_exactness() {
 #[test]
 fn test_halfkp_trainer_nonzero_forward_and_quantization_consistency() {
     let mut trainer = HalfKPTrainer::new();
-    let pos = Position::startpos();
+    let mut pos = Position::startpos();
 
     let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black);
-    let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::White);
 
     // 非ゼロの重みを意図的に設定 (ゼロ重み盲点の根絶)
     for (i, w) in trainer.output_weights.iter_mut().enumerate() {
-        *w = ((i as f32 % 17.0) - 8.0) * 10.0; // -80.0 ~ +80.0
+        *w = ((i as f32 % 17.0) - 8.0) * 0.07; // fractional updates in Q9 range
     }
-    trainer.output_bias = 50.0;
+    trainer.output_bias = 257.25;
     for &f in &mover_feats {
         for (i, w) in trainer.feature_weights[f].iter_mut().enumerate() {
-            *w = ((i as f32 % 7.0) - 3.0) * 2.0;
+            *w = ((i as f32 % 7.0) - 3.0) * 0.13;
         }
     }
 
-    let (score_cp, _raw_out, _m_acc, _o_acc, _m_h, _o_h) =
-        trainer.forward(&mover_feats, &opp_feats);
-
     // 非ゼロ重み状態で Evaluator へエクスポート
     let eval = trainer.to_evaluator();
-    let eval_score = eval.evaluate(&pos);
+    let mut rng = SimpleRng::new(0xd1b54a32d192ed03);
+    let mut total_abs_error = 0.0f32;
+    let mut max_abs_error = 0.0f32;
+    let mut samples = 0usize;
 
-    // 非ゼロの有意な値が出ていることを確認
-    assert_ne!(
-        eval_score, 0,
-        "Nonzero weights must yield non-zero evaluation score"
+    for _ in 0..64 {
+        let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move);
+        let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move.opposite());
+        let (float_cp, _, _, _, _, _) = trainer.forward(&mover_feats, &opp_feats);
+        let integer_cp = eval.evaluate(&pos);
+        let error = (float_cp - integer_cp as f32).abs();
+        total_abs_error += error;
+        max_abs_error = max_abs_error.max(error);
+        samples += 1;
+
+        let moves = MoveGenerator::generate_legal_moves(&mut pos);
+        if moves.is_empty() || pos.repetition_count() >= 4 {
+            pos = Position::startpos();
+        } else {
+            let mv = moves[rng.gen_range(moves.len())];
+            pos.do_move(mv);
+        }
+    }
+
+    let mae = total_abs_error / samples as f32;
+    println!(
+        "HalfKP quantization consistency: samples={samples}, MAE={mae:.6}cp, max={max_abs_error:.6}cp"
     );
-
-    // 量子化 (round + integer division) による差異が高々 3cp 以内であることを検証
-    let diff = (score_cp - eval_score as f32).abs();
     assert!(
-        diff <= 3.0,
-        "Trainer forward score {score_cp} deviates too much from Evaluator {eval_score} with nonzero weights (diff={diff})"
+        mae <= 2.0,
+        "Trainer/Evaluator quantization MAE must be <= 2cp, got {mae}cp"
+    );
+    assert!(
+        max_abs_error <= 3.0,
+        "individual quantization error must remain within a few cp, got {max_abs_error}cp"
+    );
+}
+
+#[test]
+fn test_halfkp_fractional_update_survives_scaled_quantization() {
+    let mut trainer = HalfKPTrainer::new();
+    let pos = Position::startpos();
+    let feature = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black)[0];
+    let initial = trainer.feature_weights[feature][0];
+    trainer.feature_weights[feature][0] = initial + 0.1;
+
+    assert_eq!(
+        trainer.feature_weights[feature][0].round(),
+        initial.round(),
+        "the legacy scale-1 export would erase this update"
+    );
+    let eval = trainer.to_evaluator();
+    let initial_quantized = (initial * 64.0).round() as i16;
+    assert_ne!(
+        eval.feature_weights[feature][0], initial_quantized,
+        "the Q6 export must preserve a 0.1-weight update"
     );
 }
 

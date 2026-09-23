@@ -25,6 +25,9 @@ fn main() {
         "train-nnue" => {
             run_train_nnue(&args[2..]);
         }
+        "export-halfkp" => {
+            run_export_halfkp(&args[2..]);
+        }
         "match" => {
             run_match(&args[2..]);
         }
@@ -45,6 +48,153 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn run_export_halfkp(args: &[String]) {
+    use tabula_shogi::board::Position;
+    use tabula_shogi::eval::halfkp::{
+        HALFKP_BIAS_SCALE, HALFKP_FEATURE_SCALE, HALFKP_MAGIC, HALFKP_OUTPUT_SCALE, HalfKPEvaluator,
+    };
+    use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
+    use tabula_shogi::movegen::MoveGenerator;
+    use tabula_shogi::selfplay::game::SimpleRng;
+
+    let parser = ArgParser::new(args);
+    if parser.has_flag("--help", Some("-h")) {
+        println!(
+            r#"TabulaShogi HalfKP Checkpoint Exporter
+USAGE:
+    tabula-shogi export-halfkp [OPTIONS]
+
+OPTIONS:
+        --checkpoint <PATH>   Float AdamW checkpoint [default: models/candidate_halfkp_ckpt.bin]
+    -o, --out <PATH>          TABU_HK2 quantized model [default: models/candidate_halfkp.bin]
+        --samples <N>         Deterministic positions for float/int verification [default: 128]
+    -h, --help                Print this help message
+"#
+        );
+        return;
+    }
+
+    let checkpoint_path = parser
+        .get_string("--checkpoint", None)
+        .unwrap_or_else(|| "models/candidate_halfkp_ckpt.bin".to_string());
+    let output_path = parser
+        .get_string("--out", Some("-o"))
+        .unwrap_or_else(|| "models/candidate_halfkp.bin".to_string());
+    let sample_count = parser.get_value("--samples", None).unwrap_or(128usize);
+
+    let checkpoint_canonical = std::fs::canonicalize(&checkpoint_path).unwrap_or_else(|e| {
+        eprintln!("Error: cannot resolve checkpoint '{checkpoint_path}': {e}");
+        std::process::exit(1);
+    });
+    if let Ok(output_canonical) = std::fs::canonicalize(&output_path)
+        && checkpoint_canonical == output_canonical
+    {
+        eprintln!(
+            "Error: checkpoint and output paths must be different; refusing to overwrite the checkpoint"
+        );
+        std::process::exit(1);
+    }
+
+    println!("=== TabulaShogi HalfKP TABU_HK2 Export ===");
+    println!("Checkpoint: {checkpoint_path}");
+    println!("Output:     {output_path}");
+    println!(
+        "Scales: feature={}, output={}, bias={}",
+        HALFKP_FEATURE_SCALE, HALFKP_OUTPUT_SCALE, HALFKP_BIAS_SCALE
+    );
+
+    let trainer = HalfKPTrainer::load_checkpoint(&checkpoint_path).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
+    let evaluator = trainer.to_evaluator();
+    let stats = trainer.quantization_stats(&evaluator);
+
+    let mut pos = Position::startpos();
+    let mut rng = SimpleRng::new(0x243f6a8885a308d3);
+    let mut total_abs_error = 0.0f64;
+    let mut max_abs_error = 0.0f32;
+    let samples = sample_count.max(1);
+    for _ in 0..samples {
+        let mover = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move);
+        let opponent = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move.opposite());
+        let (float_cp, _, _, _, _, _) = trainer.forward(&mover, &opponent);
+        let integer_cp = evaluator.evaluate(&pos);
+        let abs_error = (float_cp - integer_cp as f32).abs();
+        total_abs_error += abs_error as f64;
+        max_abs_error = max_abs_error.max(abs_error);
+
+        let legal_moves = MoveGenerator::generate_legal_moves(&mut pos);
+        if legal_moves.is_empty() || pos.repetition_count() >= 4 {
+            pos = Position::startpos();
+        } else {
+            let mv = legal_moves[rng.gen_range(legal_moves.len())];
+            pos.do_move(mv);
+        }
+    }
+    let mae = total_abs_error / samples as f64;
+
+    evaluator.save_to_file(&output_path).unwrap_or_else(|e| {
+        eprintln!("Error: failed to save HalfKP model '{output_path}': {e}");
+        std::process::exit(1);
+    });
+
+    let feature_total = stats.feature_values.max(1) as f64;
+    println!(
+        "Feature non-zero: float={}/{} ({:.4}%), TABU_HK2={}/{} ({:.4}%)",
+        stats.float_nonzero_features,
+        stats.feature_values,
+        stats.float_nonzero_features as f64 * 100.0 / feature_total,
+        stats.quantized_nonzero_features,
+        stats.feature_values,
+        stats.quantized_nonzero_features as f64 * 100.0 / feature_total
+    );
+    println!(
+        "Changed from deterministic initialization: float={}/{} ({:.4}%), legacy-scale-survivors={}/{} ({:.4}%), TABU_HK2-survivors={}/{} ({:.4}%)",
+        stats.float_changed_from_initial,
+        stats.feature_values,
+        stats.float_changed_from_initial as f64 * 100.0 / feature_total,
+        stats.legacy_changed_from_initial,
+        stats.feature_values,
+        stats.legacy_changed_from_initial as f64 * 100.0 / feature_total,
+        stats.scaled_changed_from_initial,
+        stats.feature_values,
+        stats.scaled_changed_from_initial as f64 * 100.0 / feature_total
+    );
+    println!(
+        "Saturation: feature={}, feature_bias={}, output={}, output_bias={}",
+        stats.feature_saturations,
+        stats.feature_bias_saturations,
+        stats.output_saturations,
+        usize::from(stats.output_bias_saturated)
+    );
+    println!(
+        "Output weights non-zero: {}/{}",
+        stats.output_nonzero,
+        evaluator.output_weights.len()
+    );
+    println!(
+        "Float/int verification: samples={}, MAE={:.6} cp, max_abs_error={:.6} cp",
+        samples, mae, max_abs_error
+    );
+
+    drop(evaluator);
+    let loaded = HalfKPEvaluator::load_from_file(&output_path).unwrap_or_else(|e| {
+        eprintln!("Error: exported model failed reload validation: {e}");
+        std::process::exit(1);
+    });
+    let bytes = std::fs::metadata(&output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!(
+        "Reload validation: magic={}, bytes={}, startpos_eval={} cp",
+        String::from_utf8_lossy(HALFKP_MAGIC),
+        bytes,
+        loaded.evaluate(&Position::startpos())
+    );
+    println!("Export completed successfully.");
 }
 
 struct ArgParser<'a> {
@@ -281,6 +431,7 @@ fn run_match(args: &[String]) {
         println!("    -d, --depth <D>                    Search depth [default: 2]");
         println!("    -t, --threads <T>                  Worker threads [default: 2]");
         println!("    -o, --opening <K>                  Random opening plies [default: 6]");
+        println!("        --generation <N>               Opening seed generation [default: 0]");
         return;
     }
 
@@ -294,6 +445,7 @@ fn run_match(args: &[String]) {
     let depth = parser.get_value("--depth", Some("-d")).unwrap_or(2);
     let threads = parser.get_value("--threads", Some("-t")).unwrap_or(2);
     let opening = parser.get_value("--opening", Some("-o")).unwrap_or(6);
+    let generation = parser.get_value("--generation", None).unwrap_or(0);
 
     let (name_a, eval_a) = parse_eval_mode(&engine1_desc);
     let (name_b, eval_b) = parse_eval_mode(&engine2_desc);
@@ -306,6 +458,7 @@ fn run_match(args: &[String]) {
         pairs,
         depth,
         threads,
+        generation,
         random_opening: opening,
         max_plies: 320,
         tt_size_mb: 16,
@@ -430,6 +583,7 @@ COMMANDS:
     selfplay    Autonomous self-play generation pipeline (games, CSA, dataset)
     tune        Texel Tuning solver for evaluation parameter optimization
     train-nnue  Scratch NNUE neural network trainer (backprop + Adam)
+    export-halfkp Export a float HalfKP checkpoint to scaled TABU_HK2 weights
     match       Arena game-pair match between two models with SPRT testing
     loop        Full autonomous self-improvement loop (selfplay -> train -> match -> promote)
     bench       Run search performance benchmark on standard positions
