@@ -12,7 +12,7 @@
   - 外部の学習済み重みファイル等に依存せず、ゼロベースで設計された駒得・Piece-Square Tables (PST)・玉の安全度・大局観（HCE）に加え、本格的な **HalfKP ニューラルネットワーク評価関数**（204,120 スパース特徴行 × 128 隠れ層 ClippedReLU、約2,613万重みパラメータ、IIZ 多重反復雑巾絞り蒸留、スパース AdamW ストリーミング学習）およびスクラッチ Residual Baseline NNUE を完全内蔵。
   - 自己対局生成データを用いたバックプロパゲーション＆Adamオプティマイザによる強化学習・評価関数自己進化パイプラインを完全内蔵。
 - **超高速・堅牢なRust実装**:
-  - 外部クレート依存ゼロ（Zero External Dependencies）。標準ライブラリのみで完結。
+  - コアエンジンは外部クレート依存ゼロ（KIF 定跡ファイルの文字コード変換用 `encoding_rs` のみ使用）。
   - リリースビルド時で **250万〜300万 NPS (Nodes Per Second)** の超高速探索性能を実現。
 - **本格的なゲーム木探索アルゴリズム**:
   - **Negamax + Alpha-Beta枝刈り**
@@ -51,6 +51,7 @@ cargo build --release
 ビルドが完了すると、以下のパスに実行ファイルが生成されます：
 
 - Windows: `target/release/tabula-shogi.exe`
+- Linux / macOS: `target/release/tabula-shogi`
 
 ---
 

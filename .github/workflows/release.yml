@@ -35,13 +35,22 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
+      - name: Read Rust toolchain from rust-toolchain.toml
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$channel" ]; then
+            echo "Failed to read channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.1
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -75,12 +84,32 @@ jobs:
           tar -czf "$PKG_NAME.tar.gz" -C "$PKG_NAME" .
           echo "ASSET_PATH=$PKG_NAME.tar.gz" >> $GITHUB_ENV
 
-      - name: Initialize release notes placeholder
-        shell: bash
-        run: touch release_notes.md
+      - name: Upload packaged asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-${{ matrix.os }}
+          path: ${{ env.ASSET_PATH }}
+
+  publish-release:
+    name: Publish GitHub Release
+    if: github.repository == 'takumikusumoto/tabula-shogi'
+    needs: build-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download packaged assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-asset-*
+          merge-multiple: true
+          path: release-assets
 
       - name: Generate Release Notes
-        if: matrix.os == 'ubuntu-latest'
         run: |
           TAG="${{ github.ref_name }}"
           if [ "${{ github.ref_type }}" != "tag" ]; then
@@ -119,22 +148,21 @@ jobs:
             CHANGELOG="${CHANGELOG}\n### 🔧 開発基盤・その他 (Chores)\n${CHORES}\n"
           fi
 
-          CHANGES_SECTION=""
-          if [ -n "$CHANGELOG" ]; then
-            CHANGES_SECTION="---
-
-          ## 主な変更点 ($DIFF_TITLE)
-          $(echo -e "$CHANGELOG")
-"
-          fi
-
-          cat <<EOF | sed 's/^          //' > release_notes.md
+          {
+            cat <<EOF
           ## 概要
 
           TabulaShogi $TAG のリリースです。
           外部の学習済みモデル・評価重み・定跡バイナリ・他将棋OSSの探索コードに一切依存せず、完全スクラッチで実装されたUSI対応将棋エンジンです。
+          EOF
 
-          ${CHANGES_SECTION}---
+            if [ -n "$CHANGELOG" ]; then
+              printf '\n---\n\n## 主な変更点 (%s)\n%b\n' "$DIFF_TITLE" "$CHANGELOG"
+            fi
+
+            cat <<EOF
+
+          ---
 
           ## 配布物（Assets）の構成
 
@@ -169,12 +197,13 @@ jobs:
 
           ビルド手順・CLIサブコマンド・USIオプションの詳細については、同梱の \`README.md\` をご確認ください。
           EOF
+          } | sed 's/^          //' > release_notes.md
 
-      - name: Upload Release Asset
+      - name: Create Release & Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag_name }}
-          files: ${{ env.ASSET_PATH }}
+          files: release-assets/*
           body_path: release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
