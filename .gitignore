@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+*.exe
+*.zip
+*.tar.gz
+*.bin
+*.tsv
+*.csa
+*.log
+*.err
+loop_state.txt
+*.bak
+*.csv
+archive/
+/data/**
+/models/**

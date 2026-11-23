@@ -1,0 +1,280 @@
+mod common;
+use common::TestTempDir;
+use std::fs;
+use tabula_shogi::arena::{
+    LoopArenaParams, LoopConfig, LoopStoragePaths, LoopTrainingParams, MatchResult,
+    SelfImprovementLoop, SprtStatus,
+};
+use tabula_shogi::eval::EvalMode;
+use tabula_shogi::eval::halfkp::HalfKPEvaluator;
+use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
+
+#[test]
+fn test_halfkp_autonomous_loop_single_iteration() {
+    let ws = TestTempDir::new("hkp_loop_test");
+    let data_path = ws.file_path("data.tsv");
+    let deep_data_path = ws.file_path("deep.tsv");
+    let best_path = ws.file_path("best.bin");
+    let cand_path = ws.file_path("cand.bin");
+    let cand_ckpt_path = ws.file_path("cand_ckpt.bin");
+    let state_path = ws.file_path("state.txt");
+    let summary_path = ws.file_path("summary.csv");
+
+    let config = LoopConfig {
+        iterations: 1,
+        start_iteration: Some(1),
+        games_per_iteration: 4,
+        arena: LoopArenaParams {
+            eval_pairs: 2,
+            threads: 2,
+            depth: 1,
+            min_promotion_games: 20,
+        },
+        training: LoopTrainingParams {
+            epochs: 2,
+            lr: 0.001,
+            batch_size: 16,
+        },
+        paths: LoopStoragePaths {
+            state_path: state_path.clone(),
+            data_path: data_path.clone(),
+            deep_data_path: deep_data_path.clone(),
+            best_model_path: best_path.clone(),
+            candidate_model_path: cand_path.clone(),
+            candidate_ckpt_path: cand_ckpt_path.clone(),
+            summary_path: summary_path.clone(),
+        },
+    };
+
+    assert!(SelfImprovementLoop::run(&config).is_ok());
+
+    // 1. 自己対局データセットが生成されていることを確認
+    assert!(fs::metadata(&data_path).is_ok(), "Dataset must be created");
+
+    // 2. 候補モデル（HalfKPバイナリ）が正常保存され、読み込み可能であることを検証
+    assert!(
+        fs::metadata(&cand_path).is_ok(),
+        "Candidate model must be saved"
+    );
+    let loaded_eval = HalfKPEvaluator::load_from_file(&cand_path);
+    assert!(
+        loaded_eval.is_ok(),
+        "Candidate model must load successfully"
+    );
+
+    // 3. 候補チェックポイント（AdamWモーメンタムバイナリ）が正常保存され、読み込み可能であることを検証
+    assert!(
+        fs::metadata(&cand_ckpt_path).is_ok(),
+        "Candidate AdamW checkpoint must be saved"
+    );
+    let loaded_trainer = HalfKPTrainer::load_checkpoint(&cand_ckpt_path);
+    assert!(
+        loaded_trainer.is_ok(),
+        "Candidate AdamW checkpoint must load successfully"
+    );
+
+    // 4. 世代番号が永続化されていることを確認
+    assert!(
+        fs::metadata(&state_path).is_ok(),
+        "State file must be written"
+    );
+    let saved_gen = fs::read_to_string(&state_path).unwrap();
+    assert_eq!(saved_gen.trim(), "1");
+
+    // 5. 進捗サマリ CSV が出力されていることを確認
+    assert!(
+        fs::metadata(&summary_path).is_ok(),
+        "Summary CSV must be written"
+    );
+    let summary_content = fs::read_to_string(&summary_path).unwrap();
+    assert!(summary_content.contains("generation,timestamp,champion_mode"));
+    assert!(summary_content.lines().count() >= 2);
+}
+
+#[test]
+fn test_halfkp_loop_memory_release_and_checkpoint_continuation() {
+    let ws = TestTempDir::new("hkp_cont_test");
+    let data_path = ws.file_path("data.tsv");
+    let deep_data_path = ws.file_path("deep.tsv");
+    let best_path = ws.file_path("best.bin");
+    let cand_path = ws.file_path("cand.bin");
+    let cand_ckpt_path = ws.file_path("cand_ckpt.bin");
+    let state_path = ws.file_path("state.txt");
+    let summary_path = ws.file_path("summary.csv");
+
+    // 事前にダミーの AdamW チェックポイントを作成 (特定の特徴量の step_feat を 5 に設定)
+    {
+        let mut trainer = HalfKPTrainer::new();
+        trainer.step_feat[42] = 5;
+        trainer.step_feat[100] = 12;
+        trainer.output_bias = 7.5;
+        trainer
+            .save_checkpoint(&cand_ckpt_path)
+            .expect("Failed to create seed checkpoint");
+    }
+
+    let config = LoopConfig {
+        iterations: 1,
+        start_iteration: Some(2),
+        games_per_iteration: 4,
+        arena: LoopArenaParams {
+            eval_pairs: 2,
+            threads: 2,
+            depth: 1,
+            min_promotion_games: 20,
+        },
+        training: LoopTrainingParams {
+            epochs: 1,
+            lr: 0.001,
+            batch_size: 16,
+        },
+        paths: LoopStoragePaths {
+            state_path: state_path.clone(),
+            data_path: data_path.clone(),
+            deep_data_path: deep_data_path.clone(),
+            best_model_path: best_path.clone(),
+            candidate_model_path: cand_path.clone(),
+            candidate_ckpt_path: cand_ckpt_path.clone(),
+            summary_path: summary_path.clone(),
+        },
+    };
+
+    assert!(SelfImprovementLoop::run(&config).is_ok());
+
+    // チェックポイントから復元されて学習が実行され、チェックポイントがさらに更新されたことを検証
+    let continued_trainer = HalfKPTrainer::load_checkpoint(&cand_ckpt_path)
+        .expect("Must be able to load continued checkpoint");
+    assert!(
+        continued_trainer.step_feat[42] >= 5,
+        "Step count for feat 42 should be >= 5, got {}",
+        continued_trainer.step_feat[42]
+    );
+
+    // 世代番号が 2 に更新されていることを確認
+    let saved_gen = fs::read_to_string(&state_path).unwrap();
+    assert_eq!(saved_gen.trim(), "2");
+}
+
+#[test]
+fn test_halfkp_loop_promotion_gate_blocks_small_samples() {
+    let ws = TestTempDir::new("hkp_gate_test");
+    let best_path = ws.file_path("best.bin");
+
+    let candidate_eval = HalfKPEvaluator::new();
+    let mut current_best = EvalMode::Hce;
+
+    let mut sprt = tabula_shogi::arena::Sprt::new(tabula_shogi::arena::SprtConfig::default());
+    sprt.record_batch(2, 0, 0);
+
+    // 2連勝で対局数が 2局 (< 20局) の状況をシミュレート
+    let match_res = MatchResult {
+        total_games: 2,
+        wins_a: 2,
+        wins_b: 0,
+        draws: 0,
+        win_rate_a: 1.0,
+        elo_diff_a: 400.0,
+        sprt: Some(sprt),
+    };
+
+    // min_promotion_games = 20 の場合: 2局では昇格がゲートによってブロックされること
+    let promoted = tabula_shogi::arena::SelfImprovementLoop::handle_promotion(
+        1,
+        &match_res,
+        &candidate_eval,
+        &mut current_best,
+        &best_path,
+        20,
+    )
+    .expect("handle_promotion should succeed");
+
+    assert!(
+        !promoted,
+        "Promotion must be rejected when total_games < min_promotion_games (2 < 20)"
+    );
+    assert!(
+        matches!(current_best, EvalMode::Hce),
+        "Current best must remain HCE"
+    );
+    assert!(
+        !std::path::Path::new(&best_path).exists(),
+        "Best model file must not be created"
+    );
+}
+
+#[test]
+fn test_halfkp_loop_promotion_gate_permits_when_threshold_met() {
+    let ws = TestTempDir::new("hkp_gate_pass");
+    let best_path = ws.file_path("best.bin");
+
+    let candidate_eval = HalfKPEvaluator::new();
+    let mut current_best = EvalMode::Hce;
+
+    let mut sprt = tabula_shogi::arena::Sprt::new(tabula_shogi::arena::SprtConfig::default());
+    sprt.record_batch(30, 0, 0);
+    assert_eq!(sprt.status, SprtStatus::Pass);
+
+    // 30局消化して SPRT Pass (20局以上)
+    let match_res = MatchResult {
+        total_games: 30,
+        wins_a: 30,
+        wins_b: 0,
+        draws: 0,
+        win_rate_a: 1.0,
+        elo_diff_a: 300.0,
+        sprt: Some(sprt),
+    };
+
+    // min_promotion_games = 20 の場合: 30局 >= 20局 かつ SPRT Pass なので昇格が承認されること
+    let promoted = tabula_shogi::arena::SelfImprovementLoop::handle_promotion(
+        1,
+        &match_res,
+        &candidate_eval,
+        &mut current_best,
+        &best_path,
+        20,
+    )
+    .expect("handle_promotion should succeed");
+
+    assert!(
+        promoted,
+        "Promotion must be accepted when total_games >= min_promotion_games (30 >= 20) and SPRT Pass"
+    );
+    assert!(
+        matches!(current_best, EvalMode::HalfKP(_)),
+        "Current best must be updated to HalfKP"
+    );
+    assert!(
+        std::path::Path::new(&best_path).exists(),
+        "Best model file must be saved"
+    );
+
+    // 保存されたモデルがロード可能であることを検証
+    let loaded = HalfKPEvaluator::load_from_file(&best_path);
+    assert!(loaded.is_ok(), "Promoted model must be valid HalfKP binary");
+}
+
+#[test]
+fn test_relabel_deep_with_halfkp_champion() {
+    use std::sync::Arc;
+    use tabula_shogi::board::Position;
+    use tabula_shogi::selfplay::dataset::{DatasetEntry, DatasetHandler};
+
+    let start_pos = Position::startpos();
+    let mut entries = vec![DatasetEntry {
+        sfen: start_pos.to_sfen(),
+        score: 9999,
+        result: 0.5,
+        move_usi: "7g7f".to_string(),
+    }];
+
+    let halfkp = Arc::new(HalfKPEvaluator::new());
+    let eval_mode = EvalMode::HalfKP(halfkp);
+
+    let successes = DatasetHandler::relabel_deep(&mut entries, 1, 1, 1, &eval_mode);
+    assert_eq!(successes.len(), 1, "HalfKP deep relabeling must succeed");
+    assert_ne!(
+        entries[0].score, 9999,
+        "Score must be re-evaluated using HalfKP model"
+    );
+}
