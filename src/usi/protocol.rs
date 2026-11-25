@@ -1,10 +1,8 @@
 use super::parse::UsiCommand;
 use crate::board::Position;
-use crate::eval::NNUEEvaluator;
-use crate::eval::halfkp::HalfKPEvaluator;
+use crate::eval::EvalMode;
 use crate::search::{SearchEngine, TimeControl};
 use std::io::{self, BufRead};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -33,18 +31,15 @@ impl UsiHandler {
     pub fn new() -> Self {
         let halfkp_path = "models/best_halfkp.bin".to_string();
         let nnue_path = "models/nnue.bin".to_string();
-        let initial_eval = if Path::new(&halfkp_path).exists() {
-            match HalfKPEvaluator::load_from_file(&halfkp_path) {
-                Ok(hkp) => crate::eval::EvalMode::HalfKP(Arc::new(hkp)),
-                Err(e) => {
-                    eprintln!(
-                        "Error loading default HalfKP file '{halfkp_path}': {e}. Starting in HCE mode (fail-closed)."
-                    );
-                    crate::eval::EvalMode::Hce
-                }
+        let initial_eval = match EvalMode::load_if_exists_halfkp(&halfkp_path) {
+            Ok(Some(mode)) => mode,
+            Ok(None) => EvalMode::Hce,
+            Err(e) => {
+                eprintln!(
+                    "Error loading default HalfKP file '{halfkp_path}': {e}. Starting in HCE mode (fail-closed)."
+                );
+                EvalMode::Hce
             }
-        } else {
-            crate::eval::EvalMode::Hce
         };
 
         UsiHandler {
@@ -83,11 +78,7 @@ impl UsiHandler {
                     "option name Threads type spin default {} min 1 max 64",
                     self.threads
                 );
-                let default_eval = match &self.engine.eval_mode {
-                    crate::eval::EvalMode::HalfKP(_) => "HalfKP",
-                    crate::eval::EvalMode::Nnue(_) => "NNUE",
-                    crate::eval::EvalMode::Hce => "HCE",
-                };
+                let default_eval = self.engine.eval_mode.label();
                 println!(
                     "option name Eval_Type type combo default {default_eval} var HalfKP var HCE var NNUE"
                 );
@@ -111,54 +102,28 @@ impl UsiHandler {
                     self.threads = t.clamp(1, 64);
                 } else if name.eq_ignore_ascii_case("eval_type") {
                     if value.eq_ignore_ascii_case("halfkp") {
-                        if Path::new(&self.halfkp_path).exists() {
-                            match HalfKPEvaluator::load_from_file(&self.halfkp_path) {
-                                Ok(h) => {
-                                    self.engine.eval_mode =
-                                        crate::eval::EvalMode::HalfKP(Arc::new(h));
-                                    println!(
-                                        "info string Evaluation mode switched to HalfKP ({})",
-                                        self.halfkp_path
-                                    );
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "Error loading HalfKP file '{}': {e}. Evaluation mode unchanged (fail-closed).",
-                                        self.halfkp_path
-                                    );
-                                }
-                            }
-                        } else {
-                            self.engine.eval_mode =
-                                crate::eval::EvalMode::HalfKP(Arc::new(HalfKPEvaluator::new()));
-                            println!(
-                                "info string Evaluation mode switched to built-in HalfKP (no file at {})",
-                                self.halfkp_path
-                            );
-                        }
+                        self.switch_neural_eval_mode(
+                            "HalfKP",
+                            &self.halfkp_path.clone(),
+                            EvalMode::load_if_exists_halfkp,
+                            EvalMode::builtin_halfkp,
+                        );
                     } else if value.eq_ignore_ascii_case("nnue") {
-                        let eval = if Path::new(&self.nnue_path).exists() {
-                            match NNUEEvaluator::load_from_file(&self.nnue_path) {
-                                Ok(n) => Arc::new(n),
-                                Err(_) => Arc::new(NNUEEvaluator::new()),
-                            }
-                        } else {
-                            Arc::new(NNUEEvaluator::new())
-                        };
-                        self.engine.eval_mode = crate::eval::EvalMode::Nnue(eval);
-                        println!(
-                            "info string Evaluation mode switched to NNUE ({})",
-                            self.nnue_path
+                        self.switch_neural_eval_mode(
+                            "NNUE",
+                            &self.nnue_path.clone(),
+                            EvalMode::load_if_exists_nnue,
+                            EvalMode::builtin_nnue,
                         );
                     } else {
-                        self.engine.eval_mode = crate::eval::EvalMode::Hce;
+                        self.engine.eval_mode = EvalMode::Hce;
                         println!("info string Evaluation mode switched to HCE");
                     }
                 } else if name.eq_ignore_ascii_case("halfkp_file") {
                     self.halfkp_path = value.clone();
-                    match HalfKPEvaluator::load_from_file(&value) {
-                        Ok(hkp) => {
-                            self.engine.eval_mode = crate::eval::EvalMode::HalfKP(Arc::new(hkp));
+                    match EvalMode::load_halfkp(&value) {
+                        Ok(mode) => {
+                            self.engine.eval_mode = mode;
                             println!("info string Loaded HalfKP weights from {value}");
                         }
                         Err(e) => {
@@ -167,9 +132,9 @@ impl UsiHandler {
                     }
                 } else if name.eq_ignore_ascii_case("nnue_file") {
                     self.nnue_path = value.clone();
-                    match NNUEEvaluator::load_from_file(&value) {
-                        Ok(nnue) => {
-                            self.engine.eval_mode = crate::eval::EvalMode::Nnue(Arc::new(nnue));
+                    match EvalMode::load_nnue(&value) {
+                        Ok(mode) => {
+                            self.engine.eval_mode = mode;
                             println!("info string Loaded NNUE weights from {value}");
                         }
                         Err(e) => {
@@ -250,15 +215,12 @@ impl UsiHandler {
                     println!("info string total:          {:+6} cp", breakdown.total);
                     println!("eval {}", breakdown.total);
                 }
-                crate::eval::EvalMode::Nnue(nnue) => {
-                    let score = nnue.evaluate(&self.pos);
-                    println!("info string --- NNUE Evaluation ---");
-                    println!("info string total:          {:+6} cp", score);
-                    println!("eval {}", score);
-                }
-                crate::eval::EvalMode::HalfKP(halfkp) => {
-                    let score = halfkp.evaluate(&self.pos);
-                    println!("info string --- HalfKP Evaluation ---");
+                EvalMode::Nnue(_) | EvalMode::HalfKP(_) => {
+                    let score = self.engine.eval_mode.evaluate(&self.pos);
+                    println!(
+                        "info string --- {} Evaluation ---",
+                        self.engine.eval_mode.label()
+                    );
                     println!("info string total:          {:+6} cp", score);
                     println!("eval {}", score);
                 }
@@ -271,6 +233,32 @@ impl UsiHandler {
     /// 現在の評価モードを取得
     pub fn eval_mode(&self) -> &crate::eval::EvalMode {
         &self.engine.eval_mode
+    }
+
+    fn switch_neural_eval_mode(
+        &mut self,
+        label: &str,
+        path: &str,
+        loader: fn(&str) -> Result<Option<EvalMode>, String>,
+        builtin: fn() -> EvalMode,
+    ) {
+        match loader(path) {
+            Ok(Some(mode)) => {
+                self.engine.eval_mode = mode;
+                println!("info string Evaluation mode switched to {label} ({path})");
+            }
+            Ok(None) => {
+                self.engine.eval_mode = builtin();
+                println!(
+                    "info string Evaluation mode switched to built-in {label} (no file at {path})"
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "Error loading {label} file '{path}': {e}. Evaluation mode unchanged (fail-closed)."
+                );
+            }
+        }
     }
 
     fn start_search(&mut self, tc: TimeControl) {
@@ -298,7 +286,38 @@ impl UsiHandler {
 
             let main_handle = thread::spawn(move || {
                 let mut searcher = SearchEngine::with_shared_tt(main_tt).with_eval_mode(main_eval);
-                searcher.search(&mut main_pos, &main_tc, main_stop)
+                searcher
+                    .search_with_events(&mut main_pos, &main_tc, main_stop, |event| match event {
+                        crate::search::SearchEvent::BookMove(mv) => {
+                            println!("info string book move found: {}", mv.to_usi());
+                        }
+                        crate::search::SearchEvent::IllegalBookMove(mv) => {
+                            eprintln!(
+                                "Warning: Book move {} is not legal in current position! Falling back to search.",
+                                mv.to_usi()
+                            );
+                        }
+                        crate::search::SearchEvent::MateFound(mv) => {
+                            println!("info score mate 1 pv {}", mv.to_usi());
+                        }
+                        crate::search::SearchEvent::Iteration(info) => {
+                            let pv_str = info
+                                .pv
+                                .iter()
+                                .map(|m| m.to_usi())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let score_str = match info.mate_in() {
+                                Some(mate_in) => format!("score mate {mate_in}"),
+                                None => format!("score cp {}", info.score),
+                            };
+                            println!(
+                                "info depth {} {} time {} nodes {} nps {} pv {}",
+                                info.depth, score_str, info.elapsed_ms, info.nodes, info.nps, pv_str
+                            );
+                        }
+                    })
+                    .best_move()
             });
 
             // ヘルパースレッド (Thread 1..num_threads)

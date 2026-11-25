@@ -10,8 +10,8 @@ pub mod types;
 pub mod usi;
 
 pub use arena::{
-    LoopArenaParams, LoopConfig, LoopStoragePaths, LoopTrainingParams, MatchConfig, MatchResult,
-    MatchRunner, SelfImprovementLoop, Sprt,
+    LoopArenaParams, LoopConfig, LoopStoragePaths, LoopTrainingParams, LoopWorkspace, MatchConfig,
+    MatchResult, MatchRunner, OvertimePolicy, PromotionVerdict, SelfImprovementLoop, Sprt,
 };
 pub use board::Position;
 pub use book::OpeningBook;

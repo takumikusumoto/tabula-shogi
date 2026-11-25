@@ -216,7 +216,7 @@ fn test_selfplay_manager_small_batch() {
         start_game_id: 0,
     };
 
-    let stats = SelfPlayManager::run(config);
+    let stats = SelfPlayManager::run(config).expect("Small batch self-play should succeed");
     assert_eq!(stats.completed_games, 2);
     assert!(stats.total_plies > 0);
 }
@@ -314,8 +314,13 @@ fn test_dataset_relabel_deep() {
         4
     ];
 
-    let successes =
-        DatasetHandler::relabel_deep(&mut entries, 4, 1, 2, &tabula_shogi::eval::EvalMode::Hce);
+    let successes = tabula_shogi::selfplay::relabel_deep(
+        &mut entries,
+        4,
+        1,
+        2,
+        &tabula_shogi::eval::EvalMode::Hce,
+    );
     assert_eq!(successes.len(), 4, "All valid positions should succeed");
 
     for entry in &entries {
@@ -328,7 +333,7 @@ fn test_dataset_relabel_deep() {
 
 #[test]
 fn test_streaming_batch_reader() {
-    use tabula_shogi::selfplay::StreamingBatchReader;
+    use tabula_shogi::selfplay::DatasetBatchReader;
 
     let test_path = "target/test_streaming_dataset.tsv";
     let pos_start = Position::startpos();
@@ -341,10 +346,11 @@ fn test_streaming_batch_reader() {
         };
         15
     ];
+    let _ = std::fs::remove_file(test_path);
     DatasetHandler::append_to_file(test_path, &entries).expect("Failed to write test dataset");
 
     // バッチサイズ 4 でストリーミング読込 (4, 4, 4, 3, None)
-    let mut reader = StreamingBatchReader::new(test_path, 4).expect("Failed to open reader");
+    let mut reader = DatasetBatchReader::from_file(test_path, 4).expect("Failed to open reader");
     let mut total_read = 0;
     let mut batch_count = 0;
 

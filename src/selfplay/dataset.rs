@@ -2,7 +2,8 @@ use super::game::{GameRecord, SimpleRng};
 use crate::types::Color;
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Write};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DatasetEntry {
@@ -100,7 +101,9 @@ impl DatasetHandler {
 
     /// データセットファイルへ追記保存
     pub fn append_to_file(path: &str, entries: &[DatasetEntry]) -> io::Result<()> {
-        if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Some(parent) = Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -138,10 +141,64 @@ impl DatasetHandler {
         recent_ratio: f64,
         seed: u64,
     ) -> io::Result<Vec<DatasetEntry>> {
+        let mut result = Self::load_sampled_unshuffled(path, total_sample, recent_ratio, seed)?;
+        shuffle_slice(&mut result, seed);
+        Ok(result)
+    }
+
+    /// 深読みプールを優先してサンプリングするデータローダー（既存ファイルの読込障害は fail-closed）
+    /// - main_path: 通常の自己対局データ（loop_dataset.tsv）
+    /// - deep_path: 永続化された深読み再評価データ（deep_dataset.tsv）
+    /// - total_sample: 抽出する総局面数 (例: 100,000)
+    /// - deep_ratio: 深読みデータの目標比率 (例: 0.5 = 最大5万件を深読みデータから優先抽出)
+    /// - recent_ratio: 通常データ枠における最新局面比率 (例: 0.5)
+    pub fn load_sampled_with_deep_pool(
+        main_path: &str,
+        deep_path: Option<&str>,
+        total_sample: usize,
+        deep_ratio: f64,
+        recent_ratio: f64,
+        seed: u64,
+    ) -> io::Result<Vec<DatasetEntry>> {
+        let target_deep = ((total_sample as f64) * deep_ratio.clamp(0.0, 1.0)).round() as usize;
+        let deep_entries = match deep_path {
+            Some(dp) if target_deep > 0 => match path_exists_fail_closed(dp)? {
+                true => Self::load_sampled_unshuffled(dp, target_deep, 0.5, seed)?,
+                false => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+
+        let remaining = total_sample.saturating_sub(deep_entries.len());
+        let mut main_entries = if remaining > 0 && path_exists_fail_closed(main_path)? {
+            Self::load_sampled_unshuffled(main_path, remaining, recent_ratio, seed.wrapping_add(1))?
+        } else {
+            Vec::new()
+        };
+
+        let mut combined = deep_entries;
+        combined.append(&mut main_entries);
+
+        // 結合後に 1 回だけインプレースシャッフル (Fisher-Yates)
+        shuffle_slice(&mut combined, seed);
+
+        Ok(combined)
+    }
+
+    fn load_sampled_unshuffled(
+        path: &str,
+        total_sample: usize,
+        recent_ratio: f64,
+        seed: u64,
+    ) -> io::Result<Vec<DatasetEntry>> {
         let file = File::open(path)?;
+        if total_sample == 0 {
+            return Ok(Vec::new());
+        }
         let reader = BufReader::new(file);
 
-        let recent_target = ((total_sample as f64) * recent_ratio).round() as usize;
+        let clamped_ratio = recent_ratio.clamp(0.0, 1.0);
+        let recent_target = ((total_sample as f64) * clamped_ratio).round() as usize;
         let history_target = total_sample.saturating_sub(recent_target);
 
         let mut recent_queue = VecDeque::with_capacity(recent_target);
@@ -184,154 +241,122 @@ impl DatasetHandler {
             }
         }
 
-        // 過去プールと最新バッファを統合
         let mut result = history_samples;
         result.extend(recent_queue);
-
-        // ミニバッチ学習のバイアスを防ぐため、全体をインプレースでシャッフル (Fisher-Yates)
-        if result.len() > 1 {
-            for i in (1..result.len()).rev() {
-                let j = rng.gen_range(i + 1);
-                result.swap(i, j);
-            }
-        }
-
         Ok(result)
     }
+}
 
-    /// 深読みプールを優先してサンプリングするデータローダー
-    /// - main_path: 通常の自己対局データ（loop_dataset.tsv）
-    /// - deep_path: 永続化された深読み再評価データ（deep_dataset.tsv）
-    /// - total_sample: 抽出する総局面数 (例: 100,000)
-    /// - deep_ratio: 深読みデータの目標比率 (例: 0.5 = 最大5万件を深読みデータから優先抽出)
-    /// - recent_ratio: 通常データ枠における最新局面比率 (例: 0.5)
-    pub fn load_sampled_with_deep_pool(
-        main_path: &str,
-        deep_path: Option<&str>,
-        total_sample: usize,
-        deep_ratio: f64,
-        recent_ratio: f64,
-        seed: u64,
-    ) -> io::Result<Vec<DatasetEntry>> {
-        let mut deep_entries = Vec::new();
-        let target_deep = ((total_sample as f64) * deep_ratio).round() as usize;
-
-        if let Some(dp) = deep_path
-            && std::path::Path::new(dp).exists()
-            && let Ok(loaded) = Self::load_sampled(dp, target_deep, 0.5, seed)
-        {
-            deep_entries = loaded;
-        }
-
-        let remaining = total_sample.saturating_sub(deep_entries.len());
-        let mut main_entries = if remaining > 0 && std::path::Path::new(main_path).exists() {
-            Self::load_sampled(main_path, remaining, recent_ratio, seed.wrapping_add(1))?
-        } else {
-            Vec::new()
-        };
-
-        let mut combined = deep_entries;
-        combined.append(&mut main_entries);
-
-        // 全体をインプレースでシャッフル (Fisher-Yates)
-        if combined.len() > 1 {
-            let mut rng = SimpleRng::new(if seed == 0 { 0xdeadbeefcafe } else { seed });
-            for i in (1..combined.len()).rev() {
-                let j = rng.gen_range(i + 1);
-                combined.swap(i, j);
-            }
-        }
-
-        Ok(combined)
-    }
-
-    /// サンプリングされたデータセットのうち指定件数をマルチスレッドで深い探索 (Depth 4等) により再評価 (IIZ / 知識蒸留)
-    /// 戻り値: 深読み再評価が正常完了（または詰み証明）された高品質エントリのリスト（未完了・中断は含まれない）
-    pub fn relabel_deep(
-        entries: &mut [DatasetEntry],
-        count: usize,
-        depth: u8,
-        threads: usize,
-        eval_mode: &crate::eval::EvalMode,
-    ) -> Vec<DatasetEntry> {
-        // 深さ0の探索による無意味・危険な上書きを即座に拒否
-        if depth == 0 {
-            return Vec::new();
-        }
-
-        let target_len = count.min(entries.len());
-        if target_len == 0 {
-            return Vec::new();
-        }
-
-        let num_threads = threads.clamp(1, 64).min(target_len);
-        let chunk_size = target_len.div_ceil(num_threads);
-
-        let slice_to_relabel = &mut entries[..target_len];
-        let min_required_depth = 2.min(depth);
-        let successful_entries = std::sync::Mutex::new(Vec::with_capacity(target_len));
-
-        std::thread::scope(|s| {
-            for chunk in slice_to_relabel.chunks_mut(chunk_size) {
-                s.spawn(|| {
-                    let mut engine = crate::search::SearchEngine::new(4);
-                    engine.eval_mode = eval_mode.clone();
-                    engine.max_nodes = Some(30_000); // 1局面最大3万ノードで確実に打ち切り、ハング・長時間スタックを完全防止
-                    engine.use_book = false; // 深読み再評価では定跡手をスキップし、純粋な深さNの探索評価値を算出
-
-                    let mut local_successes = Vec::new();
-
-                    for entry in chunk {
-                        if let Ok(mut pos) = crate::board::Position::from_sfen(&entry.sfen) {
-                            let outcome = engine.search_fixed_depth_outcome(&mut pos, depth);
-                            // 定跡(Book)や中断(Aborted)による破壊的0上書き・不完全上書きを型レベルで完全排除
-                            if let Some(reliable_score) =
-                                outcome.reliable_score_for_relabel(min_required_depth)
-                            {
-                                entry.score = reliable_score;
-                                local_successes.push(entry.clone());
-                            }
-                        }
-                    }
-
-                    if !local_successes.is_empty() {
-                        let mut lock = successful_entries.lock().unwrap();
-                        lock.extend(local_successes);
-                    }
-                });
-            }
-        });
-
-        successful_entries.into_inner().unwrap()
+fn path_exists_fail_closed(path: &str) -> io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
-/// 巨大データセット（数百万〜1億局面）をメモリ 500MB 以内で省メモリにバッチ読み込みするストリーミングローダー
-pub struct StreamingBatchReader {
-    reader: BufReader<File>,
+fn shuffle_slice<T>(items: &mut [T], seed: u64) {
+    if items.len() <= 1 {
+        return;
+    }
+    let mut rng = SimpleRng::new(if seed == 0 { 0xdeadbeefcafe } else { seed });
+    for i in (1..items.len()).rev() {
+        let j = rng.gen_range(i + 1);
+        items.swap(i, j);
+    }
+}
+
+fn validate_batch_size(batch_size: usize) -> io::Result<()> {
+    if batch_size == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "batch_size must be greater than 0",
+        ));
+    }
+    Ok(())
+}
+
+/// 単一 TSV ファイルおよび複数パーティション TSV ディレクトリを透過的にバッチ読込する単一ストリーミングリーダー
+pub struct DatasetBatchReader {
+    file_paths: Vec<PathBuf>,
+    current_file_idx: usize,
+    current_reader: Option<BufReader<File>>,
     batch_size: usize,
+    line_buf: String,
 }
 
-impl StreamingBatchReader {
-    /// 新規ストリーミングリーダーを生成
-    pub fn new(path: &str, batch_size: usize) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        Ok(Self { reader, batch_size })
+impl DatasetBatchReader {
+    /// ファイルパス一覧とバッチサイズを指定して新規作成
+    pub fn from_files(file_paths: Vec<PathBuf>, batch_size: usize) -> io::Result<Self> {
+        validate_batch_size(batch_size)?;
+        Ok(Self {
+            file_paths,
+            current_file_idx: 0,
+            current_reader: None,
+            batch_size,
+            line_buf: String::new(),
+        })
     }
 
-    /// 次のバッチを読み込む。ファイルの末尾 (EOF) に到達した場合は None を返す。
+    /// 単一 TSV ファイルを即時オープン検証して新規作成
+    pub fn from_file(path: impl Into<PathBuf>, batch_size: usize) -> io::Result<Self> {
+        validate_batch_size(batch_size)?;
+        let path_buf = path.into();
+        let file = File::open(&path_buf)?;
+        Ok(Self {
+            file_paths: vec![path_buf],
+            current_file_idx: 1,
+            current_reader: Some(BufReader::new(file)),
+            batch_size,
+            line_buf: String::new(),
+        })
+    }
+
+    /// 読み込み対象のファイル数を取得
+    pub fn file_count(&self) -> usize {
+        self.file_paths.len()
+    }
+
+    /// 読み込み順序を Fisher-Yates でシャッフルし、先頭へ巻き戻す（エポック間でのファイル順偏向を低減）
+    pub fn shuffle_files(&mut self, seed: u64) {
+        shuffle_slice(&mut self.file_paths, seed);
+        self.reset();
+    }
+
+    /// 読み込み位置を全ファイルの先頭に巻き戻す
+    pub fn reset(&mut self) {
+        self.current_file_idx = 0;
+        self.current_reader = None;
+        self.line_buf.clear();
+    }
+
+    /// 次のバッチを読み込む。全ファイルの末尾に達した場合は None を返す。
     pub fn next_batch(&mut self) -> io::Result<Option<Vec<DatasetEntry>>> {
         let mut batch = Vec::with_capacity(self.batch_size);
-        let mut line = String::new();
 
         while batch.len() < self.batch_size {
-            line.clear();
-            let bytes_read = self.reader.read_line(&mut line)?;
+            let reader = match self.current_reader.as_mut() {
+                Some(reader) => reader,
+                None => {
+                    if self.current_file_idx >= self.file_paths.len() {
+                        break;
+                    }
+                    let next_path = &self.file_paths[self.current_file_idx];
+                    let file = File::open(next_path)?;
+                    self.current_file_idx += 1;
+                    self.current_reader.insert(BufReader::new(file))
+                }
+            };
+
+            self.line_buf.clear();
+            let bytes_read = reader.read_line(&mut self.line_buf)?;
+
             if bytes_read == 0 {
-                break; // EOF
+                self.current_reader = None;
+                continue;
             }
-            if let Some(entry) = DatasetHandler::parse_entry(&line) {
+
+            if let Some(entry) = DatasetHandler::parse_entry(&self.line_buf) {
                 batch.push(entry);
             }
         }
@@ -341,5 +366,135 @@ impl StreamingBatchReader {
         } else {
             Ok(Some(batch))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempDirGuard(PathBuf);
+
+    impl TempDirGuard {
+        fn new(prefix: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "tabula_shogi_ds_{prefix}_{}_{}",
+                std::process::id(),
+                id
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sample_entry(score: i32) -> DatasetEntry {
+        DatasetEntry {
+            sfen: "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1".to_string(),
+            score,
+            result: 1.0,
+            move_usi: "7g7f".to_string(),
+        }
+    }
+
+    #[test]
+    fn dataset_batch_reader_supports_single_file_reset_and_rejects_invalid_inputs() {
+        let tmp = TempDirGuard::new("batch_single");
+        let path = tmp.path("single.tsv");
+        let entries: Vec<DatasetEntry> = (0..7).map(sample_entry).collect();
+        DatasetHandler::append_to_file(&path, &entries).unwrap();
+
+        assert!(DatasetBatchReader::from_file(&path, 0).is_err());
+        assert!(DatasetBatchReader::from_file(tmp.path("missing.tsv"), 4).is_err());
+
+        let mut reader = DatasetBatchReader::from_file(&path, 3).unwrap();
+        assert_eq!(reader.file_count(), 1);
+        assert_eq!(reader.next_batch().unwrap().unwrap().len(), 3);
+        assert_eq!(reader.next_batch().unwrap().unwrap().len(), 3);
+        assert_eq!(reader.next_batch().unwrap().unwrap().len(), 1);
+        assert!(reader.next_batch().unwrap().is_none());
+
+        reader.reset();
+        assert_eq!(reader.next_batch().unwrap().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn dataset_batch_reader_from_files_crosses_boundaries_and_shuffles() {
+        let tmp = TempDirGuard::new("batch_multi");
+        let p1 = tmp.path("a.tsv");
+        let p2 = tmp.path("b.tsv");
+        DatasetHandler::append_to_file(&p1, &[sample_entry(1), sample_entry(2), sample_entry(3)])
+            .unwrap();
+        DatasetHandler::append_to_file(&p2, &[sample_entry(4), sample_entry(5)]).unwrap();
+
+        assert!(DatasetBatchReader::from_files(vec![PathBuf::from(&p1)], 0).is_err());
+
+        let mut reader =
+            DatasetBatchReader::from_files(vec![PathBuf::from(&p1), PathBuf::from(&p2)], 2)
+                .unwrap();
+        assert_eq!(reader.file_count(), 2);
+
+        let mut total = 0;
+        while let Some(batch) = reader.next_batch().unwrap() {
+            assert!(batch.len() <= 2);
+            total += batch.len();
+        }
+        assert_eq!(total, 5);
+
+        reader.shuffle_files(7);
+        let mut after_shuffle = 0;
+        while let Some(batch) = reader.next_batch().unwrap() {
+            after_shuffle += batch.len();
+        }
+        assert_eq!(after_shuffle, 5);
+    }
+
+    #[test]
+    fn load_sampled_with_deep_pool_fails_closed_on_unreadable_deep_pool() {
+        let tmp = TempDirGuard::new("deep_fail_closed");
+        let main_path = tmp.path("main.tsv");
+        let deep_dir = tmp.path("deep_as_dir");
+        std::fs::create_dir_all(&deep_dir).unwrap();
+        DatasetHandler::append_to_file(&main_path, &[sample_entry(10), sample_entry(20)]).unwrap();
+
+        // Missing deep pool is allowed and falls back to main_path
+        let missing_deep = tmp.path("absent_deep.tsv");
+        let ok = DatasetHandler::load_sampled_with_deep_pool(
+            &main_path,
+            Some(&missing_deep),
+            10,
+            0.5,
+            0.5,
+            42,
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 2);
+
+        // Existing but unreadable deep pool (directory) must fail closed
+        let err = DatasetHandler::load_sampled_with_deep_pool(
+            &main_path,
+            Some(&deep_dir),
+            10,
+            0.5,
+            0.5,
+            42,
+        );
+        assert!(
+            err.is_err(),
+            "Unreadable existing deep_path must fail closed instead of silently degrading"
+        );
     }
 }

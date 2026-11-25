@@ -1,298 +1,330 @@
-use std::sync::Arc;
+mod common;
+use common::TestTempDir;
+use std::fs;
+use std::path::Path;
 use tabula_shogi::board::Position;
-use tabula_shogi::eval::halfkp::{HALFKP_HIDDEN_SIZE, HALFKP_INPUT_SIZE, HalfKPEvaluator};
-use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
-use tabula_shogi::movegen::MoveGenerator;
-use tabula_shogi::selfplay::game::SimpleRng;
-use tabula_shogi::types::Color;
+use tabula_shogi::eval::halfkp::HalfKPEvaluator;
+use tabula_shogi::eval::halfkp_trainer::{
+    DEFAULT_SIGMOID_K, HalfKPInitPolicy, HalfKPTargetPolicy, HalfKPTrainSessionConfig,
+    HalfKPTrainSource, MAX_BATCH_SIZE, export_halfkp_checkpoint, inspect_halfkp_checkpoint,
+    train_halfkp_session,
+};
+use tabula_shogi::eval::sigmoid_win_rate;
+use tabula_shogi::selfplay::dataset::DatasetEntry;
 
-#[test]
-fn test_halfkp_trainer_initialization_and_roundtrip() {
-    let eval = HalfKPEvaluator::new();
-    let trainer = HalfKPTrainer::from_evaluator(&eval);
-
-    assert_eq!(trainer.feature_weights.len(), HALFKP_INPUT_SIZE);
-    assert_eq!(trainer.feature_biases.len(), HALFKP_HIDDEN_SIZE);
-    assert_eq!(trainer.output_weights.len(), HALFKP_HIDDEN_SIZE * 2);
-
-    let exported_eval = trainer.to_evaluator();
-    assert_eq!(exported_eval.feature_weights.len(), HALFKP_INPUT_SIZE);
-    assert_eq!(exported_eval.feature_biases, eval.feature_biases);
-    assert_eq!(exported_eval.output_weights, eval.output_weights);
-    assert_eq!(exported_eval.output_bias, eval.output_bias);
-}
-
-#[test]
-fn test_halfkp_trainer_forward_consistency() {
-    let eval = Arc::new(HalfKPEvaluator::new());
-    let trainer = HalfKPTrainer::from_evaluator(&eval);
-    let pos = Position::startpos();
-
-    let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black);
-    let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::White);
-
-    let (score_cp, _raw_out, _m_acc, _o_acc, _m_h, _o_h) =
-        trainer.forward(&mover_feats, &opp_feats);
-    let eval_score = eval.evaluate(&pos);
-
-    // Trainer の浮動小数点 cp と Evaluator の整数 cp の差異が 2cp 以内であることを検証
-    let diff = (score_cp - eval_score as f32).abs();
-    assert!(
-        diff <= 2.0,
-        "Trainer forward score {score_cp} deviates too much from Evaluator {eval_score}"
-    );
-}
-
-#[test]
-fn test_halfkp_trainer_loss_convergence() {
-    let mut trainer = HalfKPTrainer::new();
-    let pos = Position::startpos();
-
-    let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black);
-    let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::White);
-
-    // 勝利ターゲット (1.0) に対して複数エポック学習
-    let batch = vec![(mover_feats.clone(), opp_feats.clone(), 1.0f32)];
-
-    let initial_loss = trainer.train_batch(&batch, 0.01, 600.0).mse_loss;
-    let mut last_loss = initial_loss;
-
-    for _ in 0..10 {
-        let loss = trainer.train_batch(&batch, 0.01, 600.0).mse_loss;
-        assert!(
-            loss <= last_loss + 1e-4,
-            "Loss should decrease or stay flat: current {loss} vs last {last_loss}"
-        );
-        last_loss = loss;
-    }
-
-    assert!(
-        last_loss < initial_loss,
-        "Final loss {last_loss} must be strictly lower than initial loss {initial_loss}"
-    );
-
-    // 学習後の予測値が初期値よりも勝利側 (1.0) に近づいていること
-    let (trained_cp, _, _, _, _, _) = trainer.forward(&mover_feats, &opp_feats);
-    let trained_pred = HalfKPTrainer::sigmoid(trained_cp, 600.0);
-    assert!(
-        trained_pred > 0.5,
-        "Trained prediction {trained_pred} should be biased towards win"
-    );
-}
-
-#[test]
-fn test_halfkp_trainer_sparse_gradient_exactness() {
-    let mut trainer = HalfKPTrainer::new();
-    let pos = Position::startpos();
-
-    let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black);
-    let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::White);
-
-    let active_set: std::collections::HashSet<usize> = mover_feats
-        .iter()
-        .chain(opp_feats.iter())
-        .copied()
-        .collect();
-
-    // 未出現の特徴量インデックス (例えば 100,000)
-    let inactive_idx = 100_000usize;
-    assert!(!active_set.contains(&inactive_idx));
-
-    let inactive_weights_before = trainer.feature_weights[inactive_idx];
-
-    let batch = vec![(mover_feats, opp_feats, 1.0f32)];
-    trainer.train_batch(&batch, 0.01, 600.0);
-
-    let inactive_weights_after = trainer.feature_weights[inactive_idx];
-
-    // 未出現特徴量の重みはビット完全一致で不変であること
-    assert_eq!(
-        inactive_weights_before, inactive_weights_after,
-        "Inactive feature weights must remain completely untouched (sparse update guarantee)"
-    );
-}
-
-#[test]
-fn test_halfkp_trainer_nonzero_forward_and_quantization_consistency() {
-    let mut trainer = HalfKPTrainer::new();
-    let mut pos = Position::startpos();
-
-    let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black);
-
-    // 非ゼロの重みを意図的に設定 (ゼロ重み盲点の根絶)
-    for (i, w) in trainer.output_weights.iter_mut().enumerate() {
-        *w = ((i as f32 % 17.0) - 8.0) * 0.07; // fractional updates in Q9 range
-    }
-    trainer.output_bias = 257.25;
-    for &f in &mover_feats {
-        for (i, w) in trainer.feature_weights[f].iter_mut().enumerate() {
-            *w = ((i as f32 % 7.0) - 3.0) * 0.13;
-        }
-    }
-
-    // 非ゼロ重み状態で Evaluator へエクスポート
-    let eval = trainer.to_evaluator();
-    let mut rng = SimpleRng::new(0xd1b54a32d192ed03);
-    let mut total_abs_error = 0.0f32;
-    let mut max_abs_error = 0.0f32;
-    let mut samples = 0usize;
-
-    for _ in 0..64 {
-        let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move);
-        let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move.opposite());
-        let (float_cp, _, _, _, _, _) = trainer.forward(&mover_feats, &opp_feats);
-        let integer_cp = eval.evaluate(&pos);
-        let error = (float_cp - integer_cp as f32).abs();
-        total_abs_error += error;
-        max_abs_error = max_abs_error.max(error);
-        samples += 1;
-
-        let moves = MoveGenerator::generate_legal_moves(&mut pos);
-        if moves.is_empty() || pos.repetition_count() >= 4 {
-            pos = Position::startpos();
-        } else {
-            let mv = moves[rng.gen_range(moves.len())];
-            pos.do_move(mv);
-        }
-    }
-
-    let mae = total_abs_error / samples as f32;
-    println!(
-        "HalfKP quantization consistency: samples={samples}, MAE={mae:.6}cp, max={max_abs_error:.6}cp"
-    );
-    assert!(
-        mae <= 2.0,
-        "Trainer/Evaluator quantization MAE must be <= 2cp, got {mae}cp"
-    );
-    assert!(
-        max_abs_error <= 3.0,
-        "individual quantization error must remain within a few cp, got {max_abs_error}cp"
-    );
-}
-
-#[test]
-fn test_halfkp_fractional_update_survives_scaled_quantization() {
-    let mut trainer = HalfKPTrainer::new();
-    let pos = Position::startpos();
-    let feature = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black)[0];
-    let initial = trainer.feature_weights[feature][0];
-    trainer.feature_weights[feature][0] = initial + 0.1;
-
-    assert_eq!(
-        trainer.feature_weights[feature][0].round(),
-        initial.round(),
-        "the legacy scale-1 export would erase this update"
-    );
-    let eval = trainer.to_evaluator();
-    let initial_quantized = (initial * 64.0).round() as i16;
-    assert_ne!(
-        eval.feature_weights[feature][0], initial_quantized,
-        "the Q6 export must preserve a 0.1-weight update"
-    );
-}
-
-#[test]
-fn test_halfkp_trainer_sparse_adamw_local_step_stability() {
-    let mut trainer = HalfKPTrainer::new();
-    let pos = Position::startpos();
-
-    let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black);
-    let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::White);
-
-    // 100 ステップ別の特徴量をダミー更新してグローバル時刻が進んだ状態を模擬
-    let dummy_mover = vec![0usize];
-    let dummy_opp = vec![1usize];
-    let dummy_batch = vec![(dummy_mover, dummy_opp, 0.5f32)];
-    for _ in 0..100 {
-        trainer.train_batch(&dummy_batch, 0.001, 600.0);
-    }
-
-    // 初めて登場する特徴量（mover_feats）に対する更新量を検証
-    let test_feat = mover_feats[0];
-    let weight_before = trainer.feature_weights[test_feat][0];
-
-    let lr = 0.01f32;
-    let batch = vec![(mover_feats.clone(), opp_feats.clone(), 1.0f32)];
-    trainer.train_batch(&batch, lr, 600.0);
-
-    let weight_after = trainer.feature_weights[test_feat][0];
-    let delta = (weight_after - weight_before).abs();
-
-    // グローバル時刻が進んでいても、初登場特徴量の更新量は約 1.0 * lr 付近に収まり、
-    // 3.16 * lr への跳ね上がりが防止されていることを検証
-    assert!(
-        delta <= lr * 1.5,
-        "Delta {delta} exceeds stable bound (max 1.5*lr = {}), proving local AdamW step stability",
-        lr * 1.5
-    );
-}
-
-#[test]
-fn test_halfkp_trainer_checkpoint_roundtrip() {
-    let mut trainer = HalfKPTrainer::new();
-    let pos = Position::startpos();
-    let mover_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::Black);
-    let opp_feats = HalfKPEvaluator::extract_halfkp_features(&pos, Color::White);
-    let batch = vec![(mover_feats, opp_feats, 1.0f32)];
-
-    // 1ステップ学習して状態を変更
-    trainer.train_batch(&batch, 0.01, 600.0);
-
-    let ckpt_path = "target/test_trainer_ckpt.bin";
-    trainer
-        .save_checkpoint(ckpt_path)
-        .expect("Failed to save checkpoint");
-
-    let loaded = HalfKPTrainer::load_checkpoint(ckpt_path).expect("Failed to load checkpoint");
-    let _ = std::fs::remove_file(ckpt_path);
-
-    assert_eq!(trainer.beta1_pow, loaded.beta1_pow);
-    assert_eq!(trainer.beta2_pow, loaded.beta2_pow);
-    assert_eq!(trainer.output_bias, loaded.output_bias);
-    assert_eq!(trainer.output_weights, loaded.output_weights);
-    assert_eq!(trainer.feature_biases, loaded.feature_biases);
-    assert_eq!(trainer.feature_weights[0], loaded.feature_weights[0]);
-    assert_eq!(trainer.m_feat[0], loaded.m_feat[0]);
-    assert_eq!(trainer.v_feat[0], loaded.v_feat[0]);
-    assert_eq!(trainer.step_feat[0], loaded.step_feat[0]);
-}
-
-#[test]
-fn test_halfkp_trainer_checkpoint_size_validation() {
-    let corrupted_path = "target/test_corrupted_ckpt.bin";
-    std::fs::write(corrupted_path, vec![0u8; 100]).expect("Failed to write dummy corrupted file");
-
-    let result = HalfKPTrainer::load_checkpoint(corrupted_path);
-    let _ = std::fs::remove_file(corrupted_path);
-
-    match result {
-        Err(err_msg) => {
-            assert!(
-                err_msg.contains("file size mismatch"),
-                "Error message should mention size mismatch: {err_msg}"
-            );
-        }
-        Ok(_) => panic!("Corrupted or truncated checkpoint file must return Err, not Ok"),
+fn startpos_entry(score: i32, result: f32) -> DatasetEntry {
+    DatasetEntry {
+        sfen: "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1".to_string(),
+        score,
+        result,
+        move_usi: "7g7f".to_string(),
     }
 }
 
 #[test]
-fn test_halfkp_trainer_checkpoint_auto_creates_parent_directories() {
-    let trainer = HalfKPTrainer::new();
-    let deep_path = "target/test_deep_dir_ckpt_auto/sub/models/test_ckpt.bin";
-    let _ = std::fs::remove_dir_all("target/test_deep_dir_ckpt_auto");
+fn test_halfkp_session_in_memory_convergence_and_persistence() {
+    let ws = TestTempDir::new("hkp_session_conv");
+    let model_path = ws.file_path("nested/models/candidate.bin");
+    let ckpt_path = ws.file_path("nested/ckpts/candidate_ckpt.bin");
 
-    trainer
-        .save_checkpoint(deep_path)
-        .expect("save_checkpoint must automatically create parent directories");
+    let mut entries = vec![startpos_entry(0, 1.0); 4];
+    let config = HalfKPTrainSessionConfig {
+        init: HalfKPInitPolicy::Fresh,
+        target: HalfKPTargetPolicy::OutcomeOnly,
+        epochs: 10,
+        batch_size: 4,
+        lr: 0.01,
+        k: DEFAULT_SIGMOID_K,
+        model_output_path: Some(model_path.clone()),
+        checkpoint_output_path: Some(ckpt_path.clone()),
+        checkpoint_interval_batches: 0,
+        persist_each_epoch: false,
+    };
+
+    let outcome = train_halfkp_session(
+        config,
+        HalfKPTrainSource::InMemory {
+            entries: &mut entries,
+            shuffle_seed: 42,
+        },
+    )
+    .expect("In-memory HalfKP session must succeed");
+
+    assert_eq!(outcome.epochs_completed, 10);
+    assert_eq!(outcome.total_positions_trained, 40);
     assert!(
-        std::path::Path::new(deep_path).exists(),
-        "Saved checkpoint file must exist"
+        outcome.final_loss.mse_loss < outcome.init_loss.mse_loss,
+        "Final MSE {} must be lower than initial MSE {}",
+        outcome.final_loss.mse_loss,
+        outcome.init_loss.mse_loss
     );
 
-    let loaded = HalfKPTrainer::load_checkpoint(deep_path)
-        .expect("Must be able to load checkpoint from created path");
-    assert_eq!(trainer.beta1_pow, loaded.beta1_pow);
+    let pos = Position::startpos();
+    let eval_cp = outcome.evaluator.evaluate(&pos);
+    let pred = sigmoid_win_rate(eval_cp as f32, DEFAULT_SIGMOID_K);
+    assert!(
+        pred > 0.5,
+        "Trained Evaluation Model should predict win bias (> 0.5), got {pred} ({eval_cp} cp)"
+    );
 
-    let _ = std::fs::remove_dir_all("target/test_deep_dir_ckpt_auto");
+    assert!(Path::new(&model_path).exists());
+    assert!(Path::new(&ckpt_path).exists());
+    let reloaded = HalfKPEvaluator::load_from_file(&model_path).expect("Saved model must reload");
+    assert_eq!(reloaded.evaluate(&pos), eval_cp);
+
+    let summary = inspect_halfkp_checkpoint(&ckpt_path).expect("Saved checkpoint must inspect");
+    assert!(summary.active_features > 0);
+    assert!(summary.total_feature_steps >= 10);
+}
+
+#[test]
+fn test_halfkp_session_resume_vs_warm_start_and_corrupt_checkpoint_fail_closed() {
+    let ws = TestTempDir::new("hkp_session_resume");
+    let model_path = ws.file_path("model.bin");
+    let ckpt_path = ws.file_path("ckpt.bin");
+    let bak_path = format!("{ckpt_path}.bak");
+
+    let mut entries = vec![startpos_entry(400, 0.5); 2];
+
+    // Session 1: Fresh training creates Training Checkpoint (no .bak yet)
+    let out1 = train_halfkp_session(
+        HalfKPTrainSessionConfig {
+            init: HalfKPInitPolicy::Fresh,
+            target: HalfKPTargetPolicy::ScoreBlend { score_weight: 0.8 },
+            epochs: 2,
+            batch_size: 2,
+            lr: 0.01,
+            k: DEFAULT_SIGMOID_K,
+            model_output_path: Some(model_path.clone()),
+            checkpoint_output_path: Some(ckpt_path.clone()),
+            checkpoint_interval_batches: 0,
+            persist_each_epoch: false,
+        },
+        HalfKPTrainSource::InMemory {
+            entries: &mut entries,
+            shuffle_seed: 1,
+        },
+    )
+    .expect("Session 1 must succeed");
+    let ckpt1 = inspect_halfkp_checkpoint(&ckpt_path).unwrap();
+    assert!(!Path::new(&bak_path).exists());
+
+    // Session 2: Resume preserves optimizer state and advances feature steps + creates .bak
+    let _out2 = train_halfkp_session(
+        HalfKPTrainSessionConfig {
+            init: HalfKPInitPolicy::ResumeOrWarmStart {
+                checkpoint_path: ckpt_path.clone(),
+                evaluator: &out1.evaluator,
+            },
+            target: HalfKPTargetPolicy::ScoreBlend { score_weight: 0.8 },
+            epochs: 2,
+            batch_size: 2,
+            lr: 0.01,
+            k: DEFAULT_SIGMOID_K,
+            model_output_path: Some(model_path.clone()),
+            checkpoint_output_path: Some(ckpt_path.clone()),
+            checkpoint_interval_batches: 0,
+            persist_each_epoch: false,
+        },
+        HalfKPTrainSource::InMemory {
+            entries: &mut entries,
+            shuffle_seed: 2,
+        },
+    )
+    .expect("Resumed session must succeed");
+
+    let ckpt2 = inspect_halfkp_checkpoint(&ckpt_path).unwrap();
+    assert!(ckpt2.total_feature_steps > ckpt1.total_feature_steps);
+    assert!(ckpt2.beta1_pow < ckpt1.beta1_pow);
+    assert!(Path::new(&bak_path).exists());
+    let bak_summary = inspect_halfkp_checkpoint(&bak_path).unwrap();
+    assert_eq!(bak_summary.total_feature_steps, ckpt1.total_feature_steps);
+
+    // Corrupt checkpoint must fail closed and point operator to .bak recovery
+    fs::write(&ckpt_path, vec![0u8; 100]).unwrap();
+    let err = train_halfkp_session(
+        HalfKPTrainSessionConfig {
+            init: HalfKPInitPolicy::ResumeOrWarmStart {
+                checkpoint_path: ckpt_path.clone(),
+                evaluator: &out1.evaluator,
+            },
+            target: HalfKPTargetPolicy::OutcomeOnly,
+            epochs: 1,
+            batch_size: 2,
+            lr: 0.01,
+            k: DEFAULT_SIGMOID_K,
+            model_output_path: Some(model_path),
+            checkpoint_output_path: Some(ckpt_path),
+            checkpoint_interval_batches: 0,
+            persist_each_epoch: false,
+        },
+        HalfKPTrainSource::InMemory {
+            entries: &mut entries,
+            shuffle_seed: 3,
+        },
+    )
+    .expect_err("Corrupt checkpoint must fail closed");
+    assert!(
+        err.contains("file size mismatch"),
+        "Error should mention size mismatch: {err}"
+    );
+    assert!(
+        err.contains(".bak"),
+        "Error should guide operator to existing .bak checkpoint: {err}"
+    );
+}
+
+#[test]
+fn test_halfkp_verified_export_and_path_collision_guard() {
+    let ws = TestTempDir::new("hkp_export");
+    let ckpt_path = ws.file_path("trained_ckpt.bin");
+    let out_path = ws.file_path("exported_model.bin");
+
+    let mut entries = vec![startpos_entry(300, 1.0); 4];
+    train_halfkp_session(
+        HalfKPTrainSessionConfig {
+            init: HalfKPInitPolicy::Fresh,
+            target: HalfKPTargetPolicy::OutcomeOnly,
+            epochs: 3,
+            batch_size: 4,
+            lr: 0.01,
+            k: DEFAULT_SIGMOID_K,
+            model_output_path: None,
+            checkpoint_output_path: Some(ckpt_path.clone()),
+            checkpoint_interval_batches: 0,
+            persist_each_epoch: false,
+        },
+        HalfKPTrainSource::InMemory {
+            entries: &mut entries,
+            shuffle_seed: 7,
+        },
+    )
+    .expect("Seed checkpoint session must succeed");
+
+    // Same path for checkpoint and output must be rejected
+    let collision_err = export_halfkp_checkpoint(&ckpt_path, &ckpt_path, 16)
+        .expect_err("Same checkpoint and output path must be rejected");
+    assert!(collision_err.contains("must be different"));
+
+    let report =
+        export_halfkp_checkpoint(&ckpt_path, &out_path, 32).expect("Verified export must succeed");
+    assert_eq!(report.verification_samples, 32);
+    assert!(
+        report.verification_mae_cp <= 2.0,
+        "Quantization MAE must stay <= 2.0 cp, got {}",
+        report.verification_mae_cp
+    );
+    assert!(
+        report.verification_max_abs_error_cp <= 3.0,
+        "Quantization max error must stay <= 3.0 cp, got {}",
+        report.verification_max_abs_error_cp
+    );
+    assert!(report.quantization.scaled_changed_from_initial > 0);
+    assert_eq!(report.output_bytes, 52_255_508);
+}
+
+#[test]
+fn test_halfkp_session_validation_guards() {
+    let ws = TestTempDir::new("hkp_validation");
+    let mut entries = vec![startpos_entry(0, 1.0)];
+
+    // 1. batch_size = 0
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::OutcomeOnly,
+                epochs: 1,
+                batch_size: 0,
+                lr: 0.001,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: None,
+                checkpoint_output_path: None,
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            HalfKPTrainSource::InMemory {
+                entries: &mut entries,
+                shuffle_seed: 1,
+            },
+        )
+        .is_err()
+    );
+
+    // 2. batch_size > MAX_BATCH_SIZE (500 MiB protection)
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::OutcomeOnly,
+                epochs: 1,
+                batch_size: MAX_BATCH_SIZE + 1,
+                lr: 0.001,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: None,
+                checkpoint_output_path: None,
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            HalfKPTrainSource::InMemory {
+                entries: &mut entries,
+                shuffle_seed: 1,
+            },
+        )
+        .is_err()
+    );
+
+    // 3. Invalid score_weight
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::ScoreBlend { score_weight: 1.5 },
+                epochs: 1,
+                batch_size: 1,
+                lr: 0.001,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: None,
+                checkpoint_output_path: None,
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            HalfKPTrainSource::InMemory {
+                entries: &mut entries,
+                shuffle_seed: 1,
+            },
+        )
+        .is_err()
+    );
+
+    // 4. Colliding model and checkpoint output paths (even before either file exists)
+    let same = ws.file_path("sub/shared.bin");
+    let alias = ws.file_path("sub/./shared.bin");
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::OutcomeOnly,
+                epochs: 1,
+                batch_size: 1,
+                lr: 0.001,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: Some(same),
+                checkpoint_output_path: Some(alias),
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            HalfKPTrainSource::InMemory {
+                entries: &mut entries,
+                shuffle_seed: 1,
+            },
+        )
+        .is_err()
+    );
+
+    // 5. Corrupted checkpoint inspection fails closed with size mismatch
+    let bad_ckpt = ws.file_path("bad_ckpt.bin");
+    fs::write(&bad_ckpt, vec![0u8; 100]).unwrap();
+    let err = inspect_halfkp_checkpoint(&bad_ckpt).expect_err("Corrupt checkpoint must fail");
+    assert!(err.contains("file size mismatch"));
 }

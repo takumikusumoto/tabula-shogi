@@ -4,16 +4,15 @@ pub mod dataset;
 pub mod game;
 pub mod manager;
 pub mod partition;
+pub mod relabel;
 
 pub use config::SelfPlayConfig;
 pub use csa::CsaSerializer;
-pub use dataset::{DatasetEntry, DatasetHandler, StreamingBatchReader};
+pub use dataset::{DatasetBatchReader, DatasetEntry, DatasetHandler};
 pub use game::{GameRecord, GameResult, GameRunner, PlyRecord, SimpleRng};
 pub use manager::{SelfPlayManager, SelfPlayStats};
-pub use partition::{
-    MultiPartitionStreamingReader, PartitionConfig, PartitionedSelfPlayManager,
-    PartitionedSessionStats,
-};
+pub use partition::{PartitionConfig, PartitionedSelfPlayManager, PartitionedSessionStats};
+pub use relabel::relabel_deep;
 
 /// CLI引数をパースして自己対局を実行
 pub fn run_cli(args: &[String]) {
@@ -92,7 +91,10 @@ pub fn run_cli(args: &[String]) {
         i += 1;
     }
 
-    SelfPlayManager::run(config);
+    if let Err(e) = SelfPlayManager::run(config) {
+        eprintln!("[Fatal Error] {e}");
+        std::process::exit(1);
+    }
 }
 
 fn print_help() {

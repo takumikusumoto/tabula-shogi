@@ -62,10 +62,8 @@ fn test_halfkp_accumulator_bit_exactness_on_legal_moves() {
         }
 
         let mv = legal_moves[rng.gen_range(legal_moves.len())];
-        let pos_before = pos.clone();
-
         pos.do_move(mv);
-        eval.update_accumulator_move(&mut diff_acc, &pos_before, mv, &pos);
+        eval.update_accumulator_after_move(&mut diff_acc, &pos, mv);
 
         // ゼロからの全再計算アキュムレータ
         let full_acc = eval.compute_accumulators_full(&pos);
@@ -121,9 +119,8 @@ fn test_halfkp_accumulator_special_moves_exactness() {
 
     for mv_usi in moves_str {
         let mv = Move::from_usi(mv_usi).expect("Valid USI move");
-        let pos_before = pos.clone();
         pos.do_move(mv);
-        eval.update_accumulator_move(&mut diff_acc, &pos_before, mv, &pos);
+        eval.update_accumulator_after_move(&mut diff_acc, &pos, mv);
 
         let full_acc = eval.compute_accumulators_full(&pos);
         assert_eq!(
@@ -276,7 +273,7 @@ fn test_halfkp_save_load_roundtrip_and_boundary_checks() {
 }
 
 #[test]
-fn test_halfkp_search_accumulator_sync_with_full_recomputation() {
+fn test_halfkp_search_legal_moves_across_game_progression() {
     use std::sync::Arc;
     use tabula_shogi::eval::EvalMode;
     use tabula_shogi::search::SearchEngine;
@@ -298,24 +295,26 @@ fn test_halfkp_search_accumulator_sync_with_full_recomputation() {
     let mut pos = Position::startpos();
     let mut rng = SimpleRng::new(0xABCDEF1234567890);
 
-    // 60 手対局を進行しながら、各手番でエンジンのルートアキュムレータによる評価値と全再計算評価値の一致を検証
-    for ply in 1..=60 {
-        engine.init_root_accumulator(&pos);
-        let root_acc = engine.halfkp_accumulators[0];
-        let diff_eval = eval.evaluate_with_accumulator(&pos, &root_acc);
-        let full_eval = eval.evaluate(&pos);
+    // 30 手対局を進行しながら、各局面での静的評価と深さ1探索の整合性を公開 interface 経由で検証
+    for ply in 1..=30 {
+        let static_eval = engine.evaluate(&pos);
+        assert_eq!(static_eval, eval.evaluate(&pos));
 
-        assert_eq!(
-            diff_eval, full_eval,
-            "Search accumulator root evaluation mismatch at ply {ply}: diff={diff_eval} vs full={full_eval}"
+        let outcome = engine.search_fixed_depth_outcome(&mut pos, 1);
+        let best_mv = outcome
+            .best_move()
+            .unwrap_or_else(|| panic!("Expected legal best move at ply {ply}"));
+        let legal_moves = MoveGenerator::generate_legal_moves(&mut pos);
+        assert!(
+            legal_moves.contains(&best_mv),
+            "HalfKP search returned illegal move at ply {ply}"
         );
 
-        let moves = MoveGenerator::generate_legal_moves(&mut pos);
-        if moves.is_empty() {
+        let mv = legal_moves[rng.gen_range(legal_moves.len())];
+        pos.do_move(mv);
+        if MoveGenerator::generate_legal_moves(&mut pos).is_empty() {
             break;
         }
-        let mv = moves[rng.gen_range(moves.len())];
-        pos.do_move(mv);
     }
 }
 

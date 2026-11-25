@@ -568,4 +568,36 @@ mod tests {
         );
         let _ = std::fs::remove_file(legacy_path);
     }
+
+    #[test]
+    fn test_usi_rejects_corrupt_nnue_without_changing_mode() {
+        use tabula_shogi::usi::UsiCommand;
+        use tabula_shogi::usi::protocol::UsiHandler;
+
+        let corrupt_path = std::env::temp_dir()
+            .join(format!("test_corrupt_nnue_{}.bin", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        std::fs::write(&corrupt_path, b"CORRUPT_NNUE").expect("write corrupt nnue fixture");
+
+        let mut handler = UsiHandler::new();
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "HCE".to_string(),
+        });
+        handler.process_command(UsiCommand::SetOption {
+            name: "nnue_file".to_string(),
+            value: corrupt_path.clone(),
+        });
+        handler.process_command(UsiCommand::SetOption {
+            name: "eval_type".to_string(),
+            value: "NNUE".to_string(),
+        });
+
+        assert!(
+            matches!(handler.eval_mode(), tabula_shogi::eval::EvalMode::Hce),
+            "corrupt NNUE model must fail closed instead of silently switching to fresh NNUE weights"
+        );
+        let _ = std::fs::remove_file(corrupt_path);
+    }
 }

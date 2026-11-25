@@ -1,13 +1,13 @@
 use std::fs;
 use std::path::Path;
 use tabula_shogi::eval::halfkp::HalfKPEvaluator;
-use tabula_shogi::eval::halfkp_stream_trainer::{HalfKPStreamTrainer, StreamTrainConfig};
-use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
-use tabula_shogi::selfplay::config::SelfPlayConfig;
-use tabula_shogi::selfplay::dataset::{DatasetEntry, DatasetHandler};
-use tabula_shogi::selfplay::partition::{
-    MultiPartitionStreamingReader, PartitionConfig, PartitionedSelfPlayManager,
+use tabula_shogi::eval::halfkp_trainer::{
+    DEFAULT_SIGMOID_K, HalfKPInitPolicy, HalfKPTargetPolicy, HalfKPTrainSessionConfig,
+    HalfKPTrainSource, inspect_halfkp_checkpoint, train_halfkp_session,
 };
+use tabula_shogi::selfplay::config::SelfPlayConfig;
+use tabula_shogi::selfplay::dataset::{DatasetBatchReader, DatasetEntry, DatasetHandler};
+use tabula_shogi::selfplay::partition::{PartitionConfig, PartitionedSelfPlayManager};
 
 #[test]
 fn test_partitioned_selfplay_generation_and_resume() {
@@ -37,12 +37,12 @@ fn test_partitioned_selfplay_generation_and_resume() {
     };
 
     // 1回目の実行: 2パーティション（計4対局）が新規生成される
-    let stats1 = PartitionedSelfPlayManager::run(config.clone());
+    let stats1 = PartitionedSelfPlayManager::run(config.clone())
+        .expect("Initial partitioned self-play must succeed");
     assert_eq!(stats1.total_partitions, 2);
     assert_eq!(stats1.completed_partitions, 2);
     assert_eq!(stats1.skipped_partitions, 0);
     assert_eq!(stats1.total_games_completed, 4);
-    assert_eq!(stats1.total_io_errors, 0);
 
     // 生成ファイルとマーカーの存在確認
     let part0_tsv = PartitionedSelfPlayManager::partition_tsv_path(test_dir, 0);
@@ -56,7 +56,8 @@ fn test_partitioned_selfplay_generation_and_resume() {
     assert!(part1_done.exists(), "part_0001.done must exist");
 
     // 2回目の実行: 既に完了しているため2パーティションともスキップ（Resume 機能）
-    let stats2 = PartitionedSelfPlayManager::run(config);
+    let stats2 = PartitionedSelfPlayManager::run(config)
+        .expect("Resumed partitioned self-play must succeed");
     assert_eq!(stats2.total_partitions, 2);
     assert_eq!(stats2.completed_partitions, 2);
     assert_eq!(
@@ -93,7 +94,7 @@ fn test_multi_partition_streaming_reader_across_boundaries() {
             score: 15,
             result: 1.0,
             move_usi: "2g2f".to_string(),
-        }
+        },
     ];
 
     let entries_part1 = vec![
@@ -114,7 +115,7 @@ fn test_multi_partition_streaming_reader_across_boundaries() {
             score: -20,
             result: 0.0,
             move_usi: "8d8e".to_string(),
-        }
+        },
     ];
 
     let tsv0 = PartitionedSelfPlayManager::partition_tsv_path(test_dir, 0);
@@ -127,8 +128,8 @@ fn test_multi_partition_streaming_reader_across_boundaries() {
     DatasetHandler::append_to_file(tsv1.to_str().unwrap(), &entries_part1).unwrap();
     fs::write(done1, "done").unwrap();
 
-    // MultiPartitionStreamingReader を初期化（batch_size = 2）
-    let mut reader = MultiPartitionStreamingReader::from_directory(test_dir, 2).unwrap();
+    // DatasetBatchReader を初期化（batch_size = 2）
+    let mut reader = DatasetBatchReader::from_partition_dir(test_dir, 2).unwrap();
     assert_eq!(reader.file_count(), 2);
 
     let mut total_read = 0usize;
@@ -186,7 +187,7 @@ fn test_halfkp_stream_training_integration() {
             score: 80,
             result: 1.0,
             move_usi: "2g2f".to_string(),
-        }
+        },
     ];
 
     let tsv_path = PartitionedSelfPlayManager::partition_tsv_path(test_dir, 0);
@@ -199,22 +200,27 @@ fn test_halfkp_stream_training_integration() {
     let _ = fs::remove_file(model_path);
     let _ = fs::remove_file(ckpt_path);
 
-    let config = StreamTrainConfig {
-        data_dir: test_dir.to_string(),
+    let config = HalfKPTrainSessionConfig {
+        init: HalfKPInitPolicy::Fresh,
+        target: HalfKPTargetPolicy::OutcomeOnly,
+        epochs: 2,
         batch_size: 2,
         lr: 0.01,
-        k: 600.0,
-        epochs: 2,
+        k: DEFAULT_SIGMOID_K,
+        model_output_path: Some(model_path.to_string()),
+        checkpoint_output_path: Some(ckpt_path.to_string()),
         checkpoint_interval_batches: 1,
-        checkpoint_path: Some(ckpt_path.to_string()),
-        model_output_path: model_path.to_string(),
-        resume_from_checkpoint: false,
+        persist_each_epoch: true,
+    };
+    let source = HalfKPTrainSource::PartitionDir {
+        data_dir: test_dir.to_string(),
+        shuffle_seed: 0x123456789ABCDEF0,
     };
 
-    let summary = HalfKPStreamTrainer::train(config).expect("Stream training must succeed");
-    assert_eq!(summary.epochs_completed, 2);
-    assert_eq!(summary.total_positions_trained, 6); // 3 entries * 2 epochs
-    assert!(summary.final_total_loss > 0.0);
+    let outcome = train_halfkp_session(config, source).expect("Stream training must succeed");
+    assert_eq!(outcome.epochs_completed, 2);
+    assert_eq!(outcome.total_positions_trained, 6); // 3 entries * 2 epochs
+    assert!(outcome.final_loss.total_loss > 0.0);
 
     // モデルファイルが正常に保存され、ロード可能であることを確認
     assert!(Path::new(model_path).exists());
@@ -222,16 +228,18 @@ fn test_halfkp_stream_training_integration() {
         HalfKPEvaluator::load_from_file(model_path).expect("Failed to load trained model");
     assert_eq!(loaded_eval.output_weights.len(), 256);
 
-    // チェックポイントファイルが正常に保存され、ロード可能であることを確認
+    // チェックポイントファイルが正常に保存され、検証可能であることを確認
     assert!(Path::new(ckpt_path).exists());
-    let loaded_trainer =
-        HalfKPTrainer::load_checkpoint(ckpt_path).expect("Failed to load checkpoint");
-    assert_eq!(loaded_trainer.output_weights.len(), 256);
+    let ckpt_summary = inspect_halfkp_checkpoint(ckpt_path).expect("Failed to inspect checkpoint");
+    assert!(ckpt_summary.active_features > 0);
+    assert!(ckpt_summary.total_feature_steps > 0);
 
     // クリーンアップ
     let _ = fs::remove_dir_all(test_dir);
     let _ = fs::remove_file(model_path);
+    let _ = fs::remove_file(format!("{model_path}.bak"));
     let _ = fs::remove_file(ckpt_path);
+    let _ = fs::remove_file(format!("{ckpt_path}.bak"));
 }
 
 #[test]
@@ -261,13 +269,15 @@ fn test_partitioned_selfplay_resume_config_mismatch_invalidation() {
         },
     };
 
-    let stats1 = PartitionedSelfPlayManager::run(config1.clone());
+    let stats1 =
+        PartitionedSelfPlayManager::run(config1.clone()).expect("Initial config run must succeed");
     assert_eq!(stats1.completed_partitions, 1);
     assert_eq!(stats1.skipped_partitions, 0);
 
     // 異なるシードで同一ディレクトリへ再実行
     config1.base_config.seed = 0x99999999;
-    let stats2 = PartitionedSelfPlayManager::run(config1);
+    let stats2 =
+        PartitionedSelfPlayManager::run(config1).expect("Regenerated config run must succeed");
     // 設定不一致により古い完了マーカーが無効化され、スキップされずに再生成されることを検証
     assert_eq!(stats2.completed_partitions, 1);
     assert_eq!(
@@ -288,34 +298,73 @@ fn test_checkpoint_atomic_save_and_backup() {
     let _ = fs::remove_file(&bak_path);
     let _ = fs::remove_file(&tmp_path);
 
-    let mut trainer = HalfKPTrainer::new();
-    trainer.output_bias = 111.0;
+    let mut entries = vec![DatasetEntry {
+        sfen: "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1".to_string(),
+        score: 50,
+        result: 1.0,
+        move_usi: "7g7f".to_string(),
+    }];
 
-    // 1回目の保存: 本番ファイルが作成される
-    trainer
-        .save_checkpoint(ckpt_path)
-        .expect("First save failed");
+    // 1回目の保存: 本番チェックポイントが作成される
+    train_halfkp_session(
+        HalfKPTrainSessionConfig {
+            init: HalfKPInitPolicy::Fresh,
+            target: HalfKPTargetPolicy::OutcomeOnly,
+            epochs: 1,
+            batch_size: 1,
+            lr: 0.01,
+            k: DEFAULT_SIGMOID_K,
+            model_output_path: None,
+            checkpoint_output_path: Some(ckpt_path.to_string()),
+            checkpoint_interval_batches: 0,
+            persist_each_epoch: false,
+        },
+        HalfKPTrainSource::InMemory {
+            entries: &mut entries,
+            shuffle_seed: 1,
+        },
+    )
+    .expect("First session save failed");
     assert!(Path::new(ckpt_path).exists());
     assert!(
         !Path::new(&tmp_path).exists(),
         ".tmp must not remain after successful save"
     );
+    let gen1 = inspect_halfkp_checkpoint(ckpt_path).unwrap();
 
-    // 2回目の保存: 状態を変更して保存
-    trainer.output_bias = 222.0;
-    trainer
-        .save_checkpoint(ckpt_path)
-        .expect("Second save failed");
+    // 2回目の保存: Resume してさらに学習・保存
+    train_halfkp_session(
+        HalfKPTrainSessionConfig {
+            init: HalfKPInitPolicy::ResumeOrFresh {
+                checkpoint_path: ckpt_path.to_string(),
+            },
+            target: HalfKPTargetPolicy::OutcomeOnly,
+            epochs: 1,
+            batch_size: 1,
+            lr: 0.01,
+            k: DEFAULT_SIGMOID_K,
+            model_output_path: None,
+            checkpoint_output_path: Some(ckpt_path.to_string()),
+            checkpoint_interval_batches: 0,
+            persist_each_epoch: false,
+        },
+        HalfKPTrainSource::InMemory {
+            entries: &mut entries,
+            shuffle_seed: 2,
+        },
+    )
+    .expect("Second session save failed");
 
-    // 本番パスには最新世代 (222.0)、.bak には直前世代 (111.0) が存在することを検証
+    // 本番パスには最新世代、.bak には直前世代が存在することを検証
     assert!(Path::new(ckpt_path).exists());
     assert!(Path::new(&bak_path).exists(), ".bak backup must exist");
 
-    let loaded_current = HalfKPTrainer::load_checkpoint(ckpt_path).unwrap();
-    assert_eq!(loaded_current.output_bias, 222.0);
+    let gen2 = inspect_halfkp_checkpoint(ckpt_path).unwrap();
+    assert!(gen2.total_feature_steps > gen1.total_feature_steps);
 
-    let loaded_bak = HalfKPTrainer::load_checkpoint(&bak_path).unwrap();
-    assert_eq!(loaded_bak.output_bias, 111.0);
+    let loaded_bak = inspect_halfkp_checkpoint(&bak_path).unwrap();
+    assert_eq!(loaded_bak.total_feature_steps, gen1.total_feature_steps);
+    assert_eq!(loaded_bak.beta1_pow, gen1.beta1_pow);
 
     let _ = fs::remove_file(ckpt_path);
     let _ = fs::remove_file(&bak_path);
@@ -327,30 +376,90 @@ fn test_stream_trainer_input_validation_and_empty_guard() {
     let _ = fs::remove_dir_all(test_dir);
     fs::create_dir_all(test_dir).unwrap();
 
-    // 1. batch_size = 0 の拒否
-    let cfg_zero_batch = StreamTrainConfig {
+    let make_source = || HalfKPTrainSource::PartitionDir {
         data_dir: test_dir.to_string(),
-        batch_size: 0,
-        ..Default::default()
+        shuffle_seed: 1,
     };
-    assert!(HalfKPStreamTrainer::train(cfg_zero_batch).is_err());
 
-    // 2. batch_size > 16384 (500MB制約保護) の拒否
-    let cfg_huge_batch = StreamTrainConfig {
-        data_dir: test_dir.to_string(),
-        batch_size: 20000,
-        ..Default::default()
-    };
-    assert!(HalfKPStreamTrainer::train(cfg_huge_batch).is_err());
+    // 1. batch_size = 0 の拒否
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::OutcomeOnly,
+                epochs: 1,
+                batch_size: 0,
+                lr: 0.001,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: None,
+                checkpoint_output_path: None,
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            make_source(),
+        )
+        .is_err()
+    );
+
+    // 2. batch_size > MAX_BATCH_SIZE (500 MiB 制約保護) の拒否
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::OutcomeOnly,
+                epochs: 1,
+                batch_size: 20000,
+                lr: 0.001,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: None,
+                checkpoint_output_path: None,
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            make_source(),
+        )
+        .is_err()
+    );
 
     // 3. 不正学習率の拒否
-    let cfg_bad_lr = StreamTrainConfig {
-        data_dir: test_dir.to_string(),
-        batch_size: 1024,
-        lr: -0.01,
-        ..Default::default()
-    };
-    assert!(HalfKPStreamTrainer::train(cfg_bad_lr).is_err());
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::OutcomeOnly,
+                epochs: 1,
+                batch_size: 1024,
+                lr: -0.01,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: None,
+                checkpoint_output_path: None,
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            make_source(),
+        )
+        .is_err()
+    );
+
+    // 4. 空パーティションディレクトリの拒否
+    assert!(
+        train_halfkp_session(
+            HalfKPTrainSessionConfig {
+                init: HalfKPInitPolicy::Fresh,
+                target: HalfKPTargetPolicy::OutcomeOnly,
+                epochs: 1,
+                batch_size: 1024,
+                lr: 0.001,
+                k: DEFAULT_SIGMOID_K,
+                model_output_path: None,
+                checkpoint_output_path: None,
+                checkpoint_interval_batches: 0,
+                persist_each_epoch: false,
+            },
+            make_source(),
+        )
+        .is_err()
+    );
 
     let _ = fs::remove_dir_all(test_dir);
 }

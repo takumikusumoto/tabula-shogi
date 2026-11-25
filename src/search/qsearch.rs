@@ -1,4 +1,4 @@
-use super::engine::{MATE_SCORE, SearchContext, SearchEngine, TIME_CHECK_INTERVAL};
+use super::engine::{MATE_SCORE, SearchContext, SearchEngine};
 use super::ordering::MoveOrderer;
 use super::see::SEE;
 use crate::board::Position;
@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 /// 静止探索 (Quiescence Search) + SEE Pruning
 /// 通常探索の末端ノードで駒の取り合いが落ち着くまでキャプチャ手・成り手のみを再帰探索し、地平線効果を抑制する。
-pub fn quiescence(
+pub(super) fn quiescence(
     engine: &mut SearchEngine,
     pos: &mut Position,
     mut alpha: i32,
@@ -16,22 +16,8 @@ pub fn quiescence(
     ply: usize,
     ctx: &SearchContext,
 ) -> i32 {
-    engine.nodes += 1;
-    if let Some(max_n) = engine.max_nodes
-        && engine.nodes >= max_n
-    {
-        ctx.stop_flag.store(true, Ordering::Relaxed);
-        return engine.evaluate_at_ply(pos, ply);
-    }
-    if engine.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
-        ctx.stop_flag.store(true, Ordering::Relaxed);
-    }
-    if ctx.stop_flag.load(Ordering::Relaxed) {
-        return 0;
-    }
-
-    if ply >= 64 {
-        return engine.evaluate_at_ply(pos, ply);
+    if let Some(early_score) = engine.check_node_and_time(pos, ply, ctx) {
+        return early_score;
     }
 
     let in_check = pos.is_in_check(pos.side_to_move);
@@ -56,10 +42,9 @@ pub fn quiescence(
         let mut best_score = -MATE_SCORE + (ply as i32);
 
         for mv in evasions {
-            pos.do_move(mv);
-            engine.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
-            let score = -quiescence(engine, pos, -beta, -alpha, ply + 1, ctx);
-            pos.undo_move();
+            let score = engine.with_move(pos, mv, ply + 1, |eng, p| {
+                -quiescence(eng, p, -beta, -alpha, ply + 1, ctx)
+            });
 
             if ctx.stop_flag.load(Ordering::Relaxed) {
                 return 0;
@@ -109,10 +94,9 @@ pub fn quiescence(
             continue;
         }
 
-        pos.do_move(mv);
-        engine.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
-        let score = -quiescence(engine, pos, -beta, -alpha, ply + 1, ctx);
-        pos.undo_move();
+        let score = engine.with_move(pos, mv, ply + 1, |eng, p| {
+            -quiescence(eng, p, -beta, -alpha, ply + 1, ctx)
+        });
 
         if ctx.stop_flag.load(Ordering::Relaxed) {
             return 0;

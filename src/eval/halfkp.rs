@@ -1,6 +1,6 @@
 use crate::board::Position;
 use crate::types::{Color, Move, Piece, PieceType, Square};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, Read, Write};
 
 pub const HALFKP_PIECE_SIZE: usize = 81 * 28 + 7 * 2 * 18; // 2,520
 pub const HALFKP_INPUT_SIZE: usize = 81 * HALFKP_PIECE_SIZE; // 81 * 2,520 = 204,120
@@ -29,7 +29,7 @@ pub const RESIDUAL_BOUND_CP: i32 = 25_000;
 
 /// 前活性を i32 で保持する堅牢な差分アキュムレータ
 /// - i16 飽和加算の不可逆性を完全に排除し、可逆な線形加減算を保証
-/// - ClippedReLU [0, 64] は評価値推論時に適用
+/// - Q6 ClippedReLU [0, 4096] は評価値推論時に適用
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HalfKPAccumulator {
     pub accumulation: [[i32; HALFKP_HIDDEN_SIZE]; 2],
@@ -287,116 +287,9 @@ impl HalfKPEvaluator {
         HalfKPAccumulator {
             accumulation: [
                 self.compute_accumulator_full(pos, Color::Black),
-                self.compute_accumulator_full(pos, Color::White)
+                self.compute_accumulator_full(pos, Color::White),
             ],
             computed: [true, true],
-        }
-    }
-
-    /// 指し手適用時の差分アキュムレータ更新
-    /// - 玉移動: 該当視点を全再計算
-    /// - 非玉移動: 移動元/先の加減算、捕獲駒の盤上減算および手駒加算、持ち駒打ちの減算
-    pub fn update_accumulator_move(
-        &self,
-        acc: &mut HalfKPAccumulator,
-        pos_before: &Position,
-        mv: Move,
-        pos_after: &Position,
-    ) {
-        for color in [Color::Black, Color::White] {
-            let c_idx = color.index();
-            let k_before = Self::get_king_sq(pos_before, color);
-            let k_after = Self::get_king_sq(pos_after, color);
-
-            // 当該視点の玉が動いた場合は全再計算
-            if k_before != k_after {
-                acc.accumulation[c_idx] = self.compute_accumulator_full(pos_after, color);
-                acc.computed[c_idx] = true;
-                continue;
-            }
-
-            let k_offset = k_before.index() * HALFKP_PIECE_SIZE;
-            let us = pos_before.side_to_move;
-
-            if mv.is_drop() {
-                // 持ち駒打ち (Drop)
-                let drop_pt = mv.drop_piece().expect("Drop move must have piece type");
-                let to_sq = mv.to();
-                let placed_piece = Piece::new(drop_pt, us);
-
-                // 1. 持ち駒から1枚減算 (使用前の手駒枚数 - 1 のスロットを減算)
-                let h_idx = drop_pt.hand_index().expect("Valid hand piece");
-                let old_count = pos_before.hand[us.index()][h_idx] as usize;
-                if old_count > 0 {
-                    let is_self = us == color;
-                    let count_slot = (old_count - 1).min(17);
-                    let h_feat = Self::hand_to_feature(drop_pt, count_slot, is_self);
-                    let feat_idx = k_offset + h_feat;
-                    Self::sub_weights(
-                        &mut acc.accumulation[c_idx],
-                        &self.feature_weights[feat_idx],
-                    );
-                }
-
-                // 2. 盤上に打たれた駒を加算
-                let p_feat = Self::piece_to_feature(to_sq, placed_piece, color);
-                let feat_idx = k_offset + p_feat;
-                Self::add_weights(
-                    &mut acc.accumulation[c_idx],
-                    &self.feature_weights[feat_idx],
-                );
-            } else {
-                // 通常移動 (Move)
-                let from_sq = mv.from().expect("Non-drop move must have from");
-                let to_sq = mv.to();
-                let moved_piece = pos_before.board[from_sq.index()].expect("Piece at from");
-
-                // 1. 移動元マス駒の減算
-                let p_from_feat = Self::piece_to_feature(from_sq, moved_piece, color);
-                let feat_from = k_offset + p_from_feat;
-                Self::sub_weights(
-                    &mut acc.accumulation[c_idx],
-                    &self.feature_weights[feat_from],
-                );
-
-                // 2. 捕獲駒があれば盤上から減算し、自軍持ち駒へ加算
-                if let Some(captured) = pos_before.board[to_sq.index()] {
-                    let p_cap_feat = Self::piece_to_feature(to_sq, captured, color);
-                    let feat_cap = k_offset + p_cap_feat;
-                    Self::sub_weights(
-                        &mut acc.accumulation[c_idx],
-                        &self.feature_weights[feat_cap],
-                    );
-
-                    // 捕獲駒は生駒として手番側 (us) の手駒へ加算
-                    let unpromoted_pt = captured.piece_type.unpromote();
-                    let h_idx = unpromoted_pt.hand_index().expect("Valid hand piece");
-                    let prev_hand_count = (pos_before.hand[us.index()][h_idx] as usize).min(17);
-                    let is_self = us == color;
-                    let h_feat = Self::hand_to_feature(unpromoted_pt, prev_hand_count, is_self);
-                    let feat_hand = k_offset + h_feat;
-                    Self::add_weights(
-                        &mut acc.accumulation[c_idx],
-                        &self.feature_weights[feat_hand],
-                    );
-                }
-
-                // 3. 移動先マス駒の加算 (成りの場合は成駒)
-                let final_piece = if mv.is_promote() {
-                    let promoted_pt = moved_piece
-                        .piece_type
-                        .promote()
-                        .unwrap_or(moved_piece.piece_type);
-                    Piece::new(promoted_pt, us)
-                } else {
-                    moved_piece
-                };
-                let p_to_feat = Self::piece_to_feature(to_sq, final_piece, color);
-                let feat_to = k_offset + p_to_feat;
-                Self::add_weights(&mut acc.accumulation[c_idx], &self.feature_weights[feat_to]);
-            }
-
-            acc.computed[c_idx] = true;
         }
     }
 
@@ -543,117 +436,123 @@ impl HalfKPEvaluator {
     /// バイナリファイルへ安全にアトミック保存 (TABU_HK2)
     /// 52MBのメモリ一括確保を完全排除し、一時ファイルへのBufWriter逐次書き出しとアトミックリネームで既存ファイルを保護
     pub fn save_to_file(&self, path: &str) -> io::Result<()> {
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp_path = format!("{path}.tmp");
-        let file = std::fs::File::create(&tmp_path)?;
-        let mut writer = BufWriter::new(file);
+        super::atomic_io::write_atomic_with_backup(path, |writer| {
+            writer.write_all(HALFKP_MAGIC)?;
+            writer.write_all(&(HALFKP_INPUT_SIZE as u32).to_le_bytes())?;
+            writer.write_all(&(HALFKP_HIDDEN_SIZE as u32).to_le_bytes())?;
 
-        writer.write_all(HALFKP_MAGIC)?;
-        writer.write_all(&(HALFKP_INPUT_SIZE as u32).to_le_bytes())?;
-        writer.write_all(&(HALFKP_HIDDEN_SIZE as u32).to_le_bytes())?;
-
-        for row in &self.feature_weights {
-            for &w in row {
+            for row in &self.feature_weights {
+                for &w in row {
+                    writer.write_all(&w.to_le_bytes())?;
+                }
+            }
+            for &b in &self.feature_biases {
+                writer.write_all(&b.to_le_bytes())?;
+            }
+            for &w in &self.output_weights {
                 writer.write_all(&w.to_le_bytes())?;
             }
-        }
-        for &b in &self.feature_biases {
-            writer.write_all(&b.to_le_bytes())?;
-        }
-        for &w in &self.output_weights {
-            writer.write_all(&w.to_le_bytes())?;
-        }
-        writer.write_all(&self.output_bias.to_le_bytes())?;
+            writer.write_all(&self.output_bias.to_le_bytes())?;
+            Ok(())
+        })
+    }
 
-        writer.flush()?;
-        drop(writer);
+    /// バイナリファイルからストリーミング読み込み (ピークメモリ ~50 MiB)
+    pub fn load_from_file(path: &str) -> Result<Self, String> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("Failed to read HalfKP file '{path}': {e}"))?;
+        let file_len = file
+            .metadata()
+            .map_err(|e| format!("Failed to read HalfKP file metadata '{path}': {e}"))?
+            .len();
 
-        let bak_path = format!("{path}.bak");
-        if std::path::Path::new(path).exists() {
-            let _ = std::fs::copy(path, &bak_path);
-        }
-
-        // 一時ファイルを本番パスへアトミックリネーム (Windows では MoveFileExW によりアトミック置換)
-        if let Err(_e) = std::fs::rename(&tmp_path, path) {
-            // 万が一プラットフォーム起因で置換失敗した場合のみ削除して再試行
-            let _ = std::fs::remove_file(path);
-            if let Err(e) = std::fs::rename(&tmp_path, path) {
-                // 再度失敗した場合はバックアップから復元して元ファイルの消失を防止
-                if std::path::Path::new(&bak_path).exists() {
-                    let _ = std::fs::copy(&bak_path, path);
-                }
-                return Err(e);
+        let mut reader = BufReader::new(file);
+        let mut magic = [0u8; 8];
+        if file_len >= HALFKP_LEGACY_MAGIC.len() as u64 {
+            reader
+                .read_exact(&mut magic)
+                .map_err(|e| format!("Failed to read HalfKP magic header from '{path}': {e}"))?;
+            if &magic == HALFKP_LEGACY_MAGIC {
+                return Err(
+                    "Legacy HalfKP format TABU_HKP is not supported by the scaled evaluator; re-export the original float checkpoint with `tabula-shogi export-halfkp`"
+                        .to_string(),
+                );
             }
         }
 
-        Ok(())
-    }
-
-    /// バイナリファイルから読み込み
-    pub fn load_from_file(path: &str) -> Result<Self, String> {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("Failed to read HalfKP file '{path}': {e}"))?;
-        if bytes.len() >= HALFKP_LEGACY_MAGIC.len()
-            && &bytes[..HALFKP_LEGACY_MAGIC.len()] == HALFKP_LEGACY_MAGIC
-        {
-            return Err(
-                "Legacy HalfKP format TABU_HKP is not supported by the scaled evaluator; re-export the original float checkpoint with `tabula-shogi export-halfkp`"
-                    .to_string(),
-            );
-        }
-
-        let expected_len = 16
+        let expected_len = (16
             + HALFKP_INPUT_SIZE * HALFKP_HIDDEN_SIZE * 2
             + HALFKP_HIDDEN_SIZE * 2
             + (HALFKP_HIDDEN_SIZE * 2) * 2
-            + 4;
-        if bytes.len() != expected_len {
+            + 4) as u64;
+        if file_len != expected_len {
             return Err(format!(
                 "HalfKP file size mismatch: got {} bytes, expected {} bytes",
-                bytes.len(),
-                expected_len
+                file_len, expected_len
             ));
         }
-        if &bytes[0..8] != HALFKP_MAGIC {
+        if &magic != HALFKP_MAGIC {
             return Err(format!(
                 "Invalid HalfKP magic header: expected {}",
                 String::from_utf8_lossy(HALFKP_MAGIC)
             ));
         }
-        let in_size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let hid_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+
+        let read_u32 = |r: &mut BufReader<std::fs::File>| -> Result<u32, String> {
+            let mut buf = [0u8; 4];
+            r.read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read HalfKP u32 from '{path}': {e}"))?;
+            Ok(u32::from_le_bytes(buf))
+        };
+        let read_i32 = |r: &mut BufReader<std::fs::File>| -> Result<i32, String> {
+            let mut buf = [0u8; 4];
+            r.read_exact(&mut buf)
+                .map_err(|e| format!("Failed to read HalfKP i32 from '{path}': {e}"))?;
+            Ok(i32::from_le_bytes(buf))
+        };
+
+        let in_size = read_u32(&mut reader)? as usize;
+        let hid_size = read_u32(&mut reader)? as usize;
         if in_size != HALFKP_INPUT_SIZE || hid_size != HALFKP_HIDDEN_SIZE {
             return Err(format!(
                 "HalfKP size mismatch: got {in_size}x{hid_size}, expected {HALFKP_INPUT_SIZE}x{HALFKP_HIDDEN_SIZE}"
             ));
         }
 
-        let mut offset = 16;
+        let mut row_bytes = [0u8; HALFKP_HIDDEN_SIZE * 2];
         let mut feature_weights = Vec::with_capacity(HALFKP_INPUT_SIZE);
         for _ in 0..HALFKP_INPUT_SIZE {
+            reader
+                .read_exact(&mut row_bytes)
+                .map_err(|e| format!("Failed to read HalfKP feature weights from '{path}': {e}"))?;
             let mut row = [0i16; HALFKP_HIDDEN_SIZE];
-            for item in row.iter_mut() {
-                *item = i16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
-                offset += 2;
+            let (chunks, _) = row_bytes.as_chunks::<2>();
+            for (dst, &chunk) in row.iter_mut().zip(chunks) {
+                *dst = i16::from_le_bytes(chunk);
             }
             feature_weights.push(row);
         }
 
+        reader
+            .read_exact(&mut row_bytes)
+            .map_err(|e| format!("Failed to read HalfKP feature biases from '{path}': {e}"))?;
         let mut feature_biases = [0i16; HALFKP_HIDDEN_SIZE];
-        for item in feature_biases.iter_mut() {
-            *item = i16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
-            offset += 2;
+        let (bias_chunks, _) = row_bytes.as_chunks::<2>();
+        for (dst, &chunk) in feature_biases.iter_mut().zip(bias_chunks) {
+            *dst = i16::from_le_bytes(chunk);
         }
 
+        let mut out_bytes = [0u8; HALFKP_HIDDEN_SIZE * 4];
+        reader
+            .read_exact(&mut out_bytes)
+            .map_err(|e| format!("Failed to read HalfKP output weights from '{path}': {e}"))?;
         let mut output_weights = [0i16; HALFKP_HIDDEN_SIZE * 2];
-        for item in output_weights.iter_mut() {
-            *item = i16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
-            offset += 2;
+        let (out_chunks, _) = out_bytes.as_chunks::<2>();
+        for (dst, &chunk) in output_weights.iter_mut().zip(out_chunks) {
+            *dst = i16::from_le_bytes(chunk);
         }
 
-        let output_bias = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let output_bias = read_i32(&mut reader)?;
 
         Ok(HalfKPEvaluator {
             feature_weights,

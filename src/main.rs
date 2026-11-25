@@ -51,13 +51,10 @@ fn main() {
 }
 
 fn run_export_halfkp(args: &[String]) {
-    use tabula_shogi::board::Position;
     use tabula_shogi::eval::halfkp::{
-        HALFKP_BIAS_SCALE, HALFKP_FEATURE_SCALE, HALFKP_MAGIC, HALFKP_OUTPUT_SCALE, HalfKPEvaluator,
+        HALFKP_BIAS_SCALE, HALFKP_FEATURE_SCALE, HALFKP_MAGIC, HALFKP_OUTPUT_SCALE,
     };
-    use tabula_shogi::eval::halfkp_trainer::HalfKPTrainer;
-    use tabula_shogi::movegen::MoveGenerator;
-    use tabula_shogi::selfplay::game::SimpleRng;
+    use tabula_shogi::eval::halfkp_trainer::export_halfkp_checkpoint;
 
     let parser = ArgParser::new(args);
     if parser.has_flag("--help", Some("-h")) {
@@ -84,19 +81,6 @@ OPTIONS:
         .unwrap_or_else(|| "models/candidate_halfkp.bin".to_string());
     let sample_count = parser.get_value("--samples", None).unwrap_or(128usize);
 
-    let checkpoint_canonical = std::fs::canonicalize(&checkpoint_path).unwrap_or_else(|e| {
-        eprintln!("Error: cannot resolve checkpoint '{checkpoint_path}': {e}");
-        std::process::exit(1);
-    });
-    if let Ok(output_canonical) = std::fs::canonicalize(&output_path)
-        && checkpoint_canonical == output_canonical
-    {
-        eprintln!(
-            "Error: checkpoint and output paths must be different; refusing to overwrite the checkpoint"
-        );
-        std::process::exit(1);
-    }
-
     println!("=== TabulaShogi HalfKP TABU_HK2 Export ===");
     println!("Checkpoint: {checkpoint_path}");
     println!("Output:     {output_path}");
@@ -105,43 +89,14 @@ OPTIONS:
         HALFKP_FEATURE_SCALE, HALFKP_OUTPUT_SCALE, HALFKP_BIAS_SCALE
     );
 
-    let trainer = HalfKPTrainer::load_checkpoint(&checkpoint_path).unwrap_or_else(|e| {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    });
-    let evaluator = trainer.to_evaluator();
-    let stats = trainer.quantization_stats(&evaluator);
-
-    let mut pos = Position::startpos();
-    let mut rng = SimpleRng::new(0x243f6a8885a308d3);
-    let mut total_abs_error = 0.0f64;
-    let mut max_abs_error = 0.0f32;
-    let samples = sample_count.max(1);
-    for _ in 0..samples {
-        let mover = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move);
-        let opponent = HalfKPEvaluator::extract_halfkp_features(&pos, pos.side_to_move.opposite());
-        let (float_cp, _, _, _, _, _) = trainer.forward(&mover, &opponent);
-        let integer_cp = evaluator.evaluate(&pos);
-        let abs_error = (float_cp - integer_cp as f32).abs();
-        total_abs_error += abs_error as f64;
-        max_abs_error = max_abs_error.max(abs_error);
-
-        let legal_moves = MoveGenerator::generate_legal_moves(&mut pos);
-        if legal_moves.is_empty() || pos.repetition_count() >= 4 {
-            pos = Position::startpos();
-        } else {
-            let mv = legal_moves[rng.gen_range(legal_moves.len())];
-            pos.do_move(mv);
-        }
-    }
-    let mae = total_abs_error / samples as f64;
-
-    evaluator.save_to_file(&output_path).unwrap_or_else(|e| {
-        eprintln!("Error: failed to save HalfKP model '{output_path}': {e}");
-        std::process::exit(1);
-    });
-
+    let report = export_halfkp_checkpoint(&checkpoint_path, &output_path, sample_count)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        });
+    let stats = report.quantization;
     let feature_total = stats.feature_values.max(1) as f64;
+
     println!(
         "Feature non-zero: float={}/{} ({:.4}%), TABU_HK2={}/{} ({:.4}%)",
         stats.float_nonzero_features,
@@ -173,26 +128,19 @@ OPTIONS:
     println!(
         "Output weights non-zero: {}/{}",
         stats.output_nonzero,
-        evaluator.output_weights.len()
+        report.evaluator.output_weights.len()
     );
     println!(
         "Float/int verification: samples={}, MAE={:.6} cp, max_abs_error={:.6} cp",
-        samples, mae, max_abs_error
+        report.verification_samples,
+        report.verification_mae_cp,
+        report.verification_max_abs_error_cp
     );
-
-    drop(evaluator);
-    let loaded = HalfKPEvaluator::load_from_file(&output_path).unwrap_or_else(|e| {
-        eprintln!("Error: exported model failed reload validation: {e}");
-        std::process::exit(1);
-    });
-    let bytes = std::fs::metadata(&output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
     println!(
         "Reload validation: magic={}, bytes={}, startpos_eval={} cp",
         String::from_utf8_lossy(HALFKP_MAGIC),
-        bytes,
-        loaded.evaluate(&Position::startpos())
+        report.output_bytes,
+        report.startpos_eval_cp
     );
     println!("Export completed successfully.");
 }
@@ -367,52 +315,10 @@ fn run_benchmark() {
 }
 
 fn parse_eval_mode(desc: &str) -> (String, tabula_shogi::eval::EvalMode) {
-    if desc.eq_ignore_ascii_case("hce") {
-        ("HCE".to_string(), tabula_shogi::eval::EvalMode::Hce)
-    } else if desc.eq_ignore_ascii_case("nnue") {
-        (
-            "NNUE(built-in)".to_string(),
-            tabula_shogi::eval::EvalMode::Nnue(std::sync::Arc::new(
-                tabula_shogi::eval::NNUEEvaluator::new(),
-            )),
-        )
-    } else if desc.eq_ignore_ascii_case("halfkp") {
-        (
-            "HalfKP(built-in)".to_string(),
-            tabula_shogi::eval::EvalMode::HalfKP(std::sync::Arc::new(
-                tabula_shogi::eval::HalfKPEvaluator::new(),
-            )),
-        )
-    } else {
-        let path = std::path::Path::new(desc);
-        if !path.exists() {
-            eprintln!("Error: Evaluation model file '{desc}' does not exist (fail-closed).");
-            std::process::exit(1);
-        }
-
-        // 1. Try HalfKP
-        match tabula_shogi::eval::HalfKPEvaluator::load_from_file(desc) {
-            Ok(halfkp) => (
-                desc.to_string(),
-                tabula_shogi::eval::EvalMode::HalfKP(std::sync::Arc::new(halfkp)),
-            ),
-            Err(e_hkp) => {
-                // 2. Try NNUE
-                match tabula_shogi::eval::NNUEEvaluator::load_from_file(desc) {
-                    Ok(nnue) => (
-                        desc.to_string(),
-                        tabula_shogi::eval::EvalMode::Nnue(std::sync::Arc::new(nnue)),
-                    ),
-                    Err(e_nnue) => {
-                        eprintln!(
-                            "Error: Failed to load evaluation model from '{desc}'. Neither HalfKP ({e_hkp}) nor NNUE ({e_nnue}) could be loaded. Aborting (fail-closed)."
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
-    }
+    tabula_shogi::eval::EvalMode::resolve_spec(desc).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    })
 }
 
 fn run_match(args: &[String]) {

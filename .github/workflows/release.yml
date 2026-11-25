@@ -7,18 +7,126 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Target tag name (e.g. v0.1.0)'
+        description: 'Target Git tag to release (e.g. v0.2.0 or v0.2.0-rc.1)'
         required: true
-        default: 'v0.1.0'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag_name }}
+  cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate Tag & Version Metadata
+    if: github.repository == 'takumikusumoto/tabula-shogi'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      git_ref: ${{ steps.meta.outputs.git_ref }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      make_latest: ${{ steps.meta.outputs.make_latest }}
+      rust_channel: ${{ steps.toolchain.outputs.channel }}
+
+    steps:
+      - name: Resolve and validate target tag
+        id: resolve
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            TAG="$INPUT_TAG"
+          fi
+
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Error: Invalid SemVer tag '$TAG'. Expected vX.Y.Z or vX.Y.Z-prerelease." >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "git_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.git_ref }}
+
+      - name: Verify Cargo.toml version and CHANGELOG.md match tag
+        id: meta
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          GIT_REF: ${{ steps.resolve.outputs.git_ref }}
+        run: |
+          set -euo pipefail
+
+          CARGO_VERSION=$(awk '
+            /^\[package\][[:space:]]*$/ { in_pkg = 1; next }
+            /^\[/ { in_pkg = 0 }
+            in_pkg && /^version[[:space:]]*=[[:space:]]*"/ {
+              sub(/^version[[:space:]]*=[[:space:]]*"/, "")
+              sub(/".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "Error: Failed to parse [package].version from Cargo.toml." >&2
+            exit 1
+          fi
+
+          if [ "$TAG" != "v${CARGO_VERSION}" ]; then
+            echo "Error: Tag '$TAG' does not match Cargo.toml version '$CARGO_VERSION'." >&2
+            exit 1
+          fi
+
+          if [[ "$CARGO_VERSION" == *-* ]]; then
+            IS_PRERELEASE="true"
+            MAKE_LATEST="false"
+          else
+            IS_PRERELEASE="false"
+            MAKE_LATEST="true"
+          fi
+
+          if [ ! -f CHANGELOG.md ]; then
+            echo "Error: CHANGELOG.md not found at tag '$TAG'." >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "git_ref=$GIT_REF" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$MAKE_LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Read Rust toolchain from rust-toolchain.toml
+        id: toolchain
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$channel" ]; then
+            echo "Error: Failed to read channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
   build-release:
     name: Build & Package (${{ matrix.os }})
     if: github.repository == 'takumikusumoto/tabula-shogi'
+    needs: validate
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -33,57 +141,83 @@ jobs:
             asset_ext: tar.gz
 
     steps:
-      - name: Checkout code
+      - name: Checkout target tag
         uses: actions/checkout@v4
-
-      - name: Read Rust toolchain from rust-toolchain.toml
-        id: rust-toolchain
-        shell: bash
-        run: |
-          channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
-          if [ -z "$channel" ]; then
-            echo "Failed to read channel from rust-toolchain.toml" >&2
-            exit 1
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+        with:
+          ref: ${{ needs.validate.outputs.git_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          toolchain: ${{ needs.validate.outputs.rust_channel }}
 
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Smoke test Windows binary
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "target/release/tabula-shogi.exe"
+
+          $verOut = (& $bin --version | Out-String).Trim()
+          if ($verOut -ne "TabulaShogi $env:EXPECTED_VERSION") {
+            throw "Unexpected --version output: '$verOut' (expected 'TabulaShogi $env:EXPECTED_VERSION')"
+          }
+
+          $usiOut = ("usi`nquit" | & $bin | Out-String)
+          if ($usiOut -notmatch [regex]::Escape("id name TabulaShogi $env:EXPECTED_VERSION")) {
+            throw "USI output missing expected id name: $usiOut"
+          }
+          if ($usiOut -notmatch "usiok") {
+            throw "USI output missing 'usiok': $usiOut"
+          }
+          Write-Host "Windows smoke test passed: $verOut"
+
+      - name: Smoke test Linux binary
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          EXPECTED_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          BIN="./target/release/tabula-shogi"
+
+          VER_OUT=$("$BIN" --version)
+          if [ "$VER_OUT" != "TabulaShogi ${EXPECTED_VERSION}" ]; then
+            echo "Error: Unexpected --version output: '$VER_OUT' (expected 'TabulaShogi ${EXPECTED_VERSION}')" >&2
+            exit 1
+          fi
+
+          USI_OUT=$(printf 'usi\nquit\n' | "$BIN")
+          echo "$USI_OUT" | grep -Fq "id name TabulaShogi ${EXPECTED_VERSION}"
+          echo "$USI_OUT" | grep -Fq "usiok"
+          echo "Linux smoke test passed: $VER_OUT"
 
       - name: Package Windows asset
         if: matrix.os == 'windows-latest'
         shell: pwsh
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_TAG: ${{ github.event.inputs.tag_name }}
+          TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          $tag = if ($env:REF_TYPE -eq "tag") { $env:REF_NAME } else { $env:INPUT_TAG }
-          $pkgName = "tabula-shogi-$tag-windows-x86_64"
-          New-Item -ItemType Directory -Path $pkgName
+          $ErrorActionPreference = 'Stop'
+          $pkgName = "tabula-shogi-$env:TAG-windows-x86_64"
+          New-Item -ItemType Directory -Path $pkgName -Force | Out-Null
           Copy-Item "target/release/tabula-shogi.exe" -Destination "$pkgName/"
           Copy-Item "README.md" -Destination "$pkgName/"
           Copy-Item "LICENSE" -Destination "$pkgName/"
-          Compress-Archive -Path "$pkgName/*" -DestinationPath "$pkgName.zip"
+          Compress-Archive -Path "$pkgName/*" -DestinationPath "$pkgName.zip" -Force
           echo "ASSET_PATH=$pkgName.zip" >> $env:GITHUB_ENV
 
       - name: Package Linux asset
         if: matrix.os == 'ubuntu-latest'
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_TAG: ${{ github.event.inputs.tag_name }}
+          TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          TAG="$REF_NAME"
-          if [ "$REF_TYPE" != "tag" ]; then
-            TAG="$INPUT_TAG"
-          fi
-          PKG_NAME="tabula-shogi-$TAG-linux-x86_64"
+          set -euo pipefail
+          PKG_NAME="tabula-shogi-${TAG}-linux-x86_64"
           mkdir -p "$PKG_NAME"
           cp target/release/tabula-shogi "$PKG_NAME/"
           cp README.md "$PKG_NAME/"
@@ -101,10 +235,19 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     if: github.repository == 'takumikusumoto/tabula-shogi'
-    needs: build-release
+    needs: [validate, build-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
+      - name: Checkout target tag for CHANGELOG.md
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.git_ref }}
+
       - name: Download packaged assets
         uses: actions/download-artifact@v4
         with:
@@ -112,64 +255,114 @@ jobs:
           merge-multiple: true
           path: release-assets
 
-      - name: Generate Release Notes
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_TAG: ${{ github.event.inputs.tag_name }}
+      - name: Generate SHA256SUMS.txt
         run: |
-          TAG="$REF_NAME"
-          if [ "$REF_TYPE" != "tag" ]; then
-            TAG="$INPUT_TAG"
+          set -euo pipefail
+          cd release-assets
+          LC_ALL=C sha256sum tabula-shogi-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest build provenance for release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: 'release-assets/*'
+
+      - name: Generate Release Notes from CHANGELOG.md
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          IS_PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+
+          extract_section() {
+            local ver="$1"
+            awk -v prefix="## [${ver}]" '
+              index($0, prefix) == 1 && (length($0) == length(prefix) || substr($0, length(prefix) + 1, 1) ~ /[[:space:]]/) {
+                found = 1
+                next
+              }
+              found && index($0, "## [") == 1 { exit }
+              found { print }
+            ' CHANGELOG.md | sed -e '/[^[:space:]]/,$!d'
+          }
+
+          CHANGELOG_BODY=$(extract_section "$VERSION")
+          if [ -z "$CHANGELOG_BODY" ] && [ "$IS_PRERELEASE" = "true" ]; then
+            BASE_VERSION="${VERSION%%-*}"
+            CHANGELOG_BODY=$(extract_section "$BASE_VERSION")
           fi
 
-          cat <<EOF > release_notes.md
-          ## 概要
+          if [ -z "$CHANGELOG_BODY" ]; then
+            echo "Error: Could not extract non-empty release notes for '$VERSION' from CHANGELOG.md." >&2
+            exit 1
+          fi
 
-          TabulaShogi $TAG のリリースです。
-          外部の学習済みモデル・評価重み・定跡バイナリ・他将棋OSSの探索コードに一切依存せず、完全スクラッチで実装されたUSI対応将棋エンジンです。
+          {
+            echo "## TabulaShogi ${TAG}"
+            echo ""
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              echo "> **Pre-release**: 正式リリース前の疎通・検証用ビルドです。"
+              echo ""
+            fi
+            echo "外部の学習済みモデル・評価重み・定跡バイナリ・他将棋 OSS の探索コードに一切依存せず、完全スクラッチで実装された USI 対応将棋エンジンです。"
+            echo ""
+            echo "### 変更点（from \`CHANGELOG.md\`）"
+            echo ""
+            printf '%s\n' "$CHANGELOG_BODY"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### 配布アセット（Assets）"
+            echo ""
+            echo "- **Windows x86_64**: \`tabula-shogi-${TAG}-windows-x86_64.zip\`（\`tabula-shogi.exe\`, \`README.md\`, \`LICENSE\`）"
+            echo "- **Linux x86_64**: \`tabula-shogi-${TAG}-linux-x86_64.tar.gz\`（\`tabula-shogi\`, \`README.md\`, \`LICENSE\`）"
+            echo "- **チェックサム**: \`SHA256SUMS.txt\`"
+            echo ""
+            echo "### 整合性・来歴検証（任意）"
+            echo ""
+            echo '```bash'
+            echo "# SHA-256 チェックサム検証"
+            echo "sha256sum -c SHA256SUMS.txt --ignore-missing"
+            echo ""
+            echo "# GitHub Artifact Attestation（SLSA ビルド来歴）検証"
+            echo "gh attestation verify tabula-shogi-${TAG}-linux-x86_64.tar.gz -R takumikusumoto/tabula-shogi"
+            echo '```'
+          } > release_notes.md
 
-          ---
+          cat release_notes.md
 
-          ## 配布物（Assets）の構成
-
-          本リリースでは、Rust開発環境不要で将棋GUI（ShogiHome、ShogiGUI、将棋所など）から直接ご利用いただける **Windows用** および **Linux（Ubuntu）用** のコンパイル済みパッケージを配布しています。
-
-          ### Windows向け (\`tabula-shogi-$TAG-windows-x86_64.zip\`)
-          \`\`\`text
-          tabula-shogi-$TAG-windows-x86_64.zip
-          ├── tabula-shogi.exe   # USI対応将棋思考エンジンの実行バイナリ（最適化ビルド済み）
-          ├── README.md          # 概要・USI GUIへのエンジン登録方法・使い方
-          └── LICENSE            # MITライセンス表示
-          \`\`\`
-          - **使い方**: ZIPを解凍後、ShogiHome / ShogiGUI 等の「エンジン設定」から \`tabula-shogi.exe\` を登録して対局・検討を開始できます。
-
-          ### Linux（Ubuntu）向け (\`tabula-shogi-$TAG-linux-x86_64.tar.gz\`)
-          \`\`\`text
-          tabula-shogi-$TAG-linux-x86_64.tar.gz
-          ├── tabula-shogi       # Linux向け実行バイナリ（実行権限付き）
-          ├── README.md
-          └── LICENSE
-          \`\`\`
-          - **使い方**:
-            \`\`\`bash
-            tar -xzf tabula-shogi-$TAG-linux-x86_64.tar.gz
-            ./tabula-shogi
-            \`\`\`
-            ターミナルでのUSI直接対話、またはLinux対応将棋GUI（ShogiHome、将棋所 Linux版等）に登録して使用できます。
-
-          ---
-
-          ## 📖 使い方とUSIオプション
-
-          ビルド手順・CLIサブコマンド・USIオプションの詳細については、同梱の \`README.md\` をご確認ください。
-          EOF
-
-      - name: Create Release & Upload Assets
-        uses: softprops/action-gh-release@v2
+      - name: Create Draft Release and Upload Assets
+        id: create_release
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag_name }}
-          files: release-assets/*
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: TabulaShogi ${{ needs.validate.outputs.tag }}
           body_path: release_notes.md
+          files: release-assets/*
+          draft: true
+          prerelease: ${{ needs.validate.outputs.is_prerelease }}
+          make_latest: ${{ needs.validate.outputs.make_latest }}
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Release Atomically
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.create_release.outputs.id }}
+          IS_PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
+          MAKE_LATEST: ${{ needs.validate.outputs.make_latest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_ID" ]; then
+            echo "Error: create_release did not output a release id." >&2
+            exit 1
+          fi
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -F "prerelease=${IS_PRERELEASE}" \
+            -f "make_latest=${MAKE_LATEST}" \
+            --jq '{id, tag_name, draft, prerelease, html_url}'

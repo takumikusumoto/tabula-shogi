@@ -1,9 +1,8 @@
 use super::config::SelfPlayConfig;
-use super::dataset::{DatasetEntry, DatasetHandler};
-use super::game::SimpleRng;
-use super::manager::{SelfPlayManager, SelfPlayStats};
+use super::dataset::DatasetBatchReader;
+use super::manager::SelfPlayManager;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -53,14 +52,15 @@ pub struct PartitionedSessionStats {
     pub completed_partitions: usize,
     pub skipped_partitions: usize,
     pub total_games_completed: usize,
-    pub total_io_errors: usize,
     pub total_duration_secs: f64,
 }
 
-impl PartitionedSessionStats {
-    /// 全パーティションが I/O エラーなく 100% 正常完了したかを判定
-    pub fn is_success(&self) -> bool {
-        self.completed_partitions == self.total_partitions && self.total_io_errors == 0
+impl DatasetBatchReader {
+    /// ディレクトリ内の全完了パーティション TSV を検索して新規作成
+    /// (`dataset -> partition` の循環依存を防ぐため、partition モジュール側で定義)
+    pub fn from_partition_dir(dir: &str, batch_size: usize) -> io::Result<Self> {
+        let files = PartitionedSelfPlayManager::discover_completed_partitions(dir)?;
+        Self::from_files(files, batch_size)
     }
 }
 
@@ -86,7 +86,7 @@ impl PartitionedSelfPlayManager {
     /// 指定ディレクトリ内の全完了パーティションTSVファイル一覧を取得（連番ソート済み）
     pub fn discover_completed_partitions(dir: &str) -> io::Result<Vec<PathBuf>> {
         let dir_path = Path::new(dir);
-        if !dir_path.exists() {
+        if !path_exists_fail_closed(dir_path)? {
             return Ok(Vec::new());
         }
 
@@ -94,11 +94,15 @@ impl PartitionedSelfPlayManager {
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
             let path = entry.path();
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name.ends_with(".tmp.tsv") {
+                continue;
+            }
             if let Some(ext) = path.extension()
                 && ext == "tsv"
             {
                 let done_path = path.with_extension("done");
-                if done_path.exists() {
+                if path_exists_fail_closed(&done_path)? {
                     tsv_files.push(path);
                 }
             }
@@ -108,10 +112,18 @@ impl PartitionedSelfPlayManager {
         Ok(tsv_files)
     }
 
-    /// 分割自己対局セッションを実行（Resume対応・中断耐性）
-    pub fn run(config: PartitionConfig) -> PartitionedSessionStats {
+    /// 分割自己対局セッションを fail-closed に実行（Resume対応・中断耐性）
+    pub fn run(config: PartitionConfig) -> Result<PartitionedSessionStats, String> {
+        if config.output_dir.trim().is_empty() {
+            return Err("Partition output_dir must not be empty".to_string());
+        }
         let overall_start = Instant::now();
-        fs::create_dir_all(&config.output_dir).expect("Failed to create output directory");
+        fs::create_dir_all(&config.output_dir).map_err(|e| {
+            format!(
+                "Failed to create partition output directory '{}': {e}",
+                config.output_dir
+            )
+        })?;
 
         let games_per_part = config.games_per_partition.max(1);
         let num_parts = config.total_games.div_ceil(games_per_part);
@@ -153,39 +165,22 @@ impl PartitionedSelfPlayManager {
             );
 
             // 既に完了マーカーが存在し、かつ設定署名が完全一致するか照合（厳格な Resume 機能）
-            if done_path.exists() && tsv_path.exists() {
-                if let Ok(existing_done) = fs::read_to_string(&done_path)
-                    && existing_done.starts_with(&expected_signature)
-                {
-                    println!(
-                        "[Resume] Partition {:04}/{} already completed with matching config. Skipping.",
-                        part_idx + 1,
-                        num_parts
-                    );
-                    stats.skipped_partitions += 1;
-                    stats.completed_partitions += 1;
-                    stats.total_games_completed += games_this_part;
-                    continue;
-                } else {
-                    println!(
-                        "[Notice] Partition {:04} exists but configuration mismatched or marker corrupted. Invalidating and regenerating.",
-                        part_idx + 1
-                    );
-                    let _ = fs::remove_file(&done_path);
-                    let _ = fs::remove_file(&tsv_path);
-                }
+            if can_resume_partition(&done_path, &tsv_path, &expected_signature)? {
+                println!(
+                    "[Resume] Partition {:04}/{} already completed with matching config. Skipping.",
+                    part_idx + 1,
+                    num_parts
+                );
+                stats.skipped_partitions += 1;
+                stats.completed_partitions += 1;
+                stats.total_games_completed += games_this_part;
+                continue;
             }
 
-            // 中断・不完全な一時ファイルが存在する場合は再生成のためにクリーンアップ
-            if tmp_tsv_path.exists() {
-                let _ = fs::remove_file(&tmp_tsv_path);
-            }
-            if tsv_path.exists() {
-                let _ = fs::remove_file(&tsv_path);
-            }
-            if done_path.exists() {
-                let _ = fs::remove_file(&done_path);
-            }
+            // 中断・不完全・設定不一致な既存ファイルを再生成前にクリーンアップ（fail-closed）
+            remove_if_exists(&tmp_tsv_path)?;
+            remove_if_exists(&tsv_path)?;
+            remove_if_exists(&done_path)?;
 
             let mut part_sp_cfg = config.base_config.clone();
             part_sp_cfg.num_games = games_this_part;
@@ -201,47 +196,48 @@ impl PartitionedSelfPlayManager {
                 start_game_id + games_this_part - 1
             );
 
-            let part_stats: SelfPlayStats = SelfPlayManager::run(part_sp_cfg);
-            stats.total_io_errors += part_stats.io_errors;
+            let part_stats = match SelfPlayManager::run(part_sp_cfg) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_tsv_path);
+                    return Err(format!(
+                        "Partition {:04}/{} self-play failed (tmp TSV discarded): {e}",
+                        part_idx + 1,
+                        num_parts
+                    ));
+                }
+            };
             stats.total_games_completed += part_stats.completed_games;
 
-            // 完了マーカーの作成 & アトミック公開
-            if part_stats.io_errors == 0 && part_stats.completed_games == games_this_part {
-                // 1. 一時 TSV を本番 TSV へアトミックリネーム
-                if let Err(e) = fs::rename(&tmp_tsv_path, &tsv_path) {
-                    eprintln!(
-                        "[Error] Failed to rename tmp TSV {:?} to {:?}: {e}",
-                        tmp_tsv_path, tsv_path
-                    );
-                    stats.total_io_errors += 1;
-                    continue;
-                }
-
-                // 2. 厳格な設定署名を含む完了マーカーの作成
-                let marker_content = format!(
-                    "{expected_signature}plies={}\nio_errors={}\n",
-                    part_stats.total_plies, part_stats.io_errors
-                );
-                if let Err(e) = fs::write(&done_path, marker_content) {
-                    eprintln!("[Error] Failed to write done marker {:?}: {e}", done_path);
-                    stats.total_io_errors += 1;
-                } else {
-                    stats.completed_partitions += 1;
-                    println!(
-                        "[Success] Partition {:04} completed, atomically published, and marked done.",
-                        part_idx + 1
-                    );
-                }
-            } else {
-                eprintln!(
-                    "[Warning] Partition {:04} finished with anomalies (completed {}/{}, io_errors={}). tmp TSV discarded.",
-                    part_idx + 1,
-                    part_stats.completed_games,
-                    games_this_part,
-                    part_stats.io_errors
-                );
+            // 1. 一時 TSV を本番 TSV へアトミックリネーム
+            fs::rename(&tmp_tsv_path, &tsv_path).map_err(|e| {
                 let _ = fs::remove_file(&tmp_tsv_path);
-            }
+                format!(
+                    "Failed to publish partition {:04} TSV '{}' -> '{}': {e}",
+                    part_idx + 1,
+                    tmp_tsv_path.display(),
+                    tsv_path.display()
+                )
+            })?;
+
+            // 2. 厳格な設定署名を含む完了マーカーを原子的作成（途中障害で 0 byte .done を残さない）
+            let marker_content = format!(
+                "{expected_signature}plies={}\nio_errors={}\n",
+                part_stats.total_plies, part_stats.io_errors
+            );
+            write_done_marker_atomic(&done_path, &marker_content).map_err(|e| {
+                format!(
+                    "Failed to write partition {:04} done marker '{}': {e}",
+                    part_idx + 1,
+                    done_path.display()
+                )
+            })?;
+
+            stats.completed_partitions += 1;
+            println!(
+                "[Success] Partition {:04} completed, atomically published, and marked done.",
+                part_idx + 1
+            );
         }
 
         stats.total_duration_secs = overall_start.elapsed().as_secs_f64();
@@ -254,100 +250,135 @@ impl PartitionedSelfPlayManager {
             stats.total_partitions, stats.completed_partitions, stats.skipped_partitions
         );
         println!("Total Games Completed: {}", stats.total_games_completed);
-        println!("Total I/O Errors: {}", stats.total_io_errors);
         println!("========================================================");
 
-        stats
+        Ok(stats)
     }
 }
 
-/// 複数パーティションTSVファイルを透過的に跨いで省メモリにバッチ読み込みするストリーミングリーダー
-pub struct MultiPartitionStreamingReader {
-    file_paths: Vec<PathBuf>,
-    current_file_idx: usize,
-    current_reader: Option<BufReader<File>>,
-    batch_size: usize,
-    line_buf: String,
+fn path_exists_fail_closed(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
-impl MultiPartitionStreamingReader {
-    /// ファイルパス一覧とバッチサイズを指定して新規作成
-    pub fn new(file_paths: Vec<PathBuf>, batch_size: usize) -> Self {
-        Self {
-            file_paths,
-            current_file_idx: 0,
-            current_reader: None,
-            batch_size,
-            line_buf: String::new(),
+fn can_resume_partition(
+    done_path: &Path,
+    tsv_path: &Path,
+    expected_signature: &str,
+) -> Result<bool, String> {
+    let has_done = path_exists_fail_closed(done_path).map_err(|e| {
+        format!(
+            "Failed to inspect done marker '{}': {e}",
+            done_path.display()
+        )
+    })?;
+    let has_tsv = path_exists_fail_closed(tsv_path).map_err(|e| {
+        format!(
+            "Failed to inspect partition TSV '{}': {e}",
+            tsv_path.display()
+        )
+    })?;
+    if !has_done || !has_tsv {
+        return Ok(false);
+    }
+
+    let existing_done = fs::read_to_string(done_path)
+        .map_err(|e| format!("Failed to read done marker '{}': {e}", done_path.display()))?;
+    if existing_done.starts_with(expected_signature) {
+        Ok(true)
+    } else {
+        println!(
+            "[Notice] Partition '{}' exists but configuration mismatched or marker corrupted. Invalidating and regenerating.",
+            tsv_path.display()
+        );
+        Ok(false)
+    }
+}
+
+fn write_done_marker_atomic(done_path: &Path, content: &str) -> io::Result<()> {
+    let mut tmp_os = done_path.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+
+    let write_res = (|| -> io::Result<()> {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_path, done_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn remove_if_exists(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "Failed to remove stale partition file '{}': {e}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempDirGuard(PathBuf);
+
+    impl TempDirGuard {
+        fn new(prefix: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "tabula_shogi_part_{prefix}_{}_{}",
+                std::process::id(),
+                id
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
         }
     }
 
-    /// ディレクトリ内の全完了パーティションを検索して新規作成
-    pub fn from_directory(dir: &str, batch_size: usize) -> io::Result<Self> {
-        let files = PartitionedSelfPlayManager::discover_completed_partitions(dir)?;
-        Ok(Self::new(files, batch_size))
-    }
-
-    /// 読み込み対象のファイル数を取得
-    pub fn file_count(&self) -> usize {
-        self.file_paths.len()
-    }
-
-    /// 読み込み順序を Fisher-Yates でシャッフル（エポック間でのファイル順偏向を低減）
-    pub fn shuffle_files(&mut self, seed: u64) {
-        if self.file_paths.len() > 1 {
-            let mut rng = SimpleRng::new(if seed == 0 { 0xdeadbeefcafe } else { seed });
-            for i in (1..self.file_paths.len()).rev() {
-                let j = (rng.next_u64() as usize) % (i + 1);
-                self.file_paths.swap(i, j);
-            }
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
         }
-        // シャッフル後は先頭からリセット
-        self.reset();
     }
 
-    /// 読み込み位置を全ファイルの先頭に巻き戻す
-    pub fn reset(&mut self) {
-        self.current_file_idx = 0;
-        self.current_reader = None;
-        self.line_buf.clear();
-    }
+    #[test]
+    fn partitioned_manager_returns_err_on_file_as_output_dir_and_empty_dir() {
+        let tmp = TempDirGuard::new("bad_dir");
+        let file_path = tmp.0.join("not_a_dir");
+        fs::write(&file_path, b"x").unwrap();
 
-    /// 次のバッチを読み込む。全ファイルの末尾に達した場合は None を返す。
-    pub fn next_batch(&mut self) -> io::Result<Option<Vec<DatasetEntry>>> {
-        let mut batch = Vec::with_capacity(self.batch_size);
+        let cfg_file = PartitionConfig {
+            total_games: 1,
+            games_per_partition: 1,
+            output_dir: file_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(PartitionedSelfPlayManager::run(cfg_file).is_err());
 
-        while batch.len() < self.batch_size {
-            // 現在のリーダーが存在しない、または EOF に達した場合は次のファイルを開く
-            if self.current_reader.is_none() {
-                if self.current_file_idx >= self.file_paths.len() {
-                    break; // 全ファイル終了
-                }
-                let next_path = &self.file_paths[self.current_file_idx];
-                let file = File::open(next_path)?;
-                self.current_reader = Some(BufReader::new(file));
-                self.current_file_idx += 1;
-            }
-
-            let reader = self.current_reader.as_mut().unwrap();
-            self.line_buf.clear();
-            let bytes_read = reader.read_line(&mut self.line_buf)?;
-
-            if bytes_read == 0 {
-                // 現在のファイルが EOF に達した
-                self.current_reader = None;
-                continue;
-            }
-
-            if let Some(entry) = DatasetHandler::parse_entry(&self.line_buf) {
-                batch.push(entry);
-            }
-        }
-
-        if batch.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(batch))
-        }
+        let cfg_empty = PartitionConfig {
+            total_games: 1,
+            games_per_partition: 1,
+            output_dir: "  ".to_string(),
+            ..Default::default()
+        };
+        assert!(PartitionedSelfPlayManager::run(cfg_empty).is_err());
     }
 }

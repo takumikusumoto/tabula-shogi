@@ -12,11 +12,12 @@ pub(crate) const INF: i32 = 30_000;
 pub(crate) const MATE_SCORE: i32 = 28_000;
 
 // --- 探索パラメータ定数 ---
-pub(crate) const TIME_CHECK_INTERVAL: u64 = 1024;
+const TIME_CHECK_INTERVAL: u64 = 1024;
 const ASPIRATION_DELTA: i32 = 35;
 const REVERSE_FUTILITY_MARGIN: i32 = 120; // depth あたり
 const FUTILITY_MARGIN: i32 = 180;
-pub(crate) const MATE_SCORE_TT_MARGIN: i32 = 500;
+const MATE_SCORE_TT_MARGIN: i32 = 500;
+const MAX_TIMED_DEPTH: u8 = 32;
 
 /// 探索結果の詳細種別（通常完了、探索中断、定跡ヒット、詰み証明、合法手なし）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,19 @@ impl SearchOutcome {
         }
     }
 
+    /// 完了した反復深化の深さを返す（定跡・詰み証明・合法手なし等の非反復深化ケースは 0、ただし MateProven は 1）
+    #[inline]
+    pub fn completed_depth(&self) -> u8 {
+        match *self {
+            SearchOutcome::Completed { depth, .. } => depth,
+            SearchOutcome::Aborted {
+                completed_depth, ..
+            } => completed_depth,
+            SearchOutcome::Book { .. } | SearchOutcome::NoLegalMoves => 0,
+            SearchOutcome::MateProven { .. } => 1,
+        }
+    }
+
     /// 深読み再評価（ラベル生成）に安全に採用できる評価値を取得
     /// 定跡（Book）や探索中断（Aborted）は信頼できる深さの評価値ではないため絶対に採用しない
     #[inline]
@@ -76,46 +90,79 @@ impl SearchOutcome {
     }
 }
 
-/// 探索結果の簡易構造体（後方互換性用）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SearchResult {
-    pub best_move: Option<Move>,
+/// 1 反復深化ステップ完了時の進捗情報（USI info 等の上位アダプタ向け）
+#[derive(Debug, Clone)]
+pub struct SearchInfo {
+    pub depth: u8,
     pub score: i32,
-    pub completed_depth: u8,
+    pub elapsed_ms: u64,
+    pub nodes: u64,
+    pub nps: u64,
+    pub pv: Vec<Move>,
 }
 
-pub struct SearchContext<'a> {
-    pub time_mgr: &'a TimeManager,
-    pub stop_flag: &'a Arc<AtomicBool>,
+impl SearchInfo {
+    /// 詰みスコアなら `Some(mate_in_plies_signed)`、通常評価値なら `None` を返す
+    pub fn mate_in(&self) -> Option<i32> {
+        if self.score.abs() >= MATE_SCORE - 100 {
+            let mate_in = if self.score > 0 {
+                ((MATE_SCORE - self.score) + 1) / 2
+            } else {
+                -((MATE_SCORE + self.score) + 1) / 2
+            };
+            Some(mate_in)
+        } else {
+            None
+        }
+    }
+}
+
+/// 探索中のイベント通知（SearchEngine から標準出力を分離するためのアダプタ境界）
+#[derive(Debug, Clone)]
+pub enum SearchEvent {
+    BookMove(Move),
+    IllegalBookMove(Move),
+    MateFound(Move),
+    Iteration(SearchInfo),
+}
+
+pub(super) struct SearchContext<'a> {
+    pub(super) time_mgr: &'a TimeManager,
+    pub(super) stop_flag: &'a Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy)]
+struct DfpnPrecheck {
+    max_nodes: u32,
+    require_near_king_guard: bool,
+}
+
+struct RootSearchSpec {
+    start_depth: u8,
+    max_depth: u8,
+    use_aspiration: bool,
+    check_time_budget: bool,
+    check_book: bool,
+    dfpn_precheck: Option<DfpnPrecheck>,
+    stop_on_mate: bool,
+    emit_pv: bool,
 }
 
 pub struct SearchEngine {
     pub tt: Arc<TranspositionTable>,
-    pub(crate) nodes: u64,
-    pub(crate) killer_moves: [[Option<Move>; 2]; 64],
-    pub(crate) counter_moves: [[Option<Move>; 81]; 81],
-    pub(crate) history: [[i32; 81]; 81],
+    nodes: u64,
+    killer_moves: [[Option<Move>; 2]; 64],
+    counter_moves: [[Option<Move>; 81]; 81],
+    pub(super) history: [[i32; 81]; 81],
     pub eval_mode: crate::eval::EvalMode,
     pub max_nodes: Option<u64>,
     pub use_book: bool,
-    pub halfkp_accumulators: Vec<crate::eval::HalfKPAccumulator>,
+    halfkp_accumulators: Vec<crate::eval::HalfKPAccumulator>,
 }
 
 impl SearchEngine {
     pub fn new(tt_size_mb: usize) -> Self {
-        let mut engine = SearchEngine {
-            tt: Arc::new(TranspositionTable::new(tt_size_mb)),
-            nodes: 0,
-            killer_moves: [[None; 2]; 64],
-            counter_moves: [[None; 81]; 81],
-            history: [[0; 81]; 81],
-            eval_mode: crate::eval::EvalMode::Hce,
-            max_nodes: None,
-            use_book: true,
-            halfkp_accumulators: vec![crate::eval::HalfKPAccumulator::empty(); 128],
-        };
-        engine.reset_heuristics();
-        engine
+        Self::with_shared_tt(Arc::new(TranspositionTable::new(tt_size_mb)))
     }
 
     /// 探索ノード数を取得
@@ -145,20 +192,22 @@ impl SearchEngine {
     }
 
     /// ルート局面でのアキュムレータ初期化 (探索開始時に一度だけ全計算)
-    pub fn init_root_accumulator(&mut self, pos: &Position) {
+    fn init_root_accumulator(&mut self, pos: &Position) {
         if let crate::eval::EvalMode::HalfKP(ref halfkp) = self.eval_mode {
             self.halfkp_accumulators[0] = halfkp.compute_accumulators_full(pos);
         }
     }
 
-    /// do_move 直後の高速アキュムレータ差分更新ヘルパー
+    /// do_move と HalfKP アキュムレータ差分更新・undo_move を組で保証する内部遷移ヘルパー
     #[inline(always)]
-    pub fn update_accumulator_after_move_at_ply(
+    pub(super) fn with_move<R>(
         &mut self,
-        pos: &Position,
+        pos: &mut Position,
         mv: Move,
         next_ply: usize,
-    ) {
+        f: impl FnOnce(&mut Self, &mut Position) -> R,
+    ) -> R {
+        pos.do_move(mv);
         if let crate::eval::EvalMode::HalfKP(ref halfkp) = self.eval_mode
             && next_ply < self.halfkp_accumulators.len()
             && next_ply > 0
@@ -166,11 +215,61 @@ impl SearchEngine {
             self.halfkp_accumulators[next_ply] = self.halfkp_accumulators[next_ply - 1];
             halfkp.update_accumulator_after_move(&mut self.halfkp_accumulators[next_ply], pos, mv);
         }
+        let result = f(self, pos);
+        pos.undo_move();
+        result
+    }
+
+    /// do_null_move と HalfKP アキュムレータ継承・undo_null_move を組で保証する内部遷移ヘルパー
+    #[inline(always)]
+    fn with_null_move<R>(
+        &mut self,
+        pos: &mut Position,
+        next_ply: usize,
+        f: impl FnOnce(&mut Self, &mut Position) -> R,
+    ) -> R {
+        pos.do_null_move();
+        if matches!(self.eval_mode, crate::eval::EvalMode::HalfKP(_))
+            && next_ply < self.halfkp_accumulators.len()
+            && next_ply > 0
+        {
+            self.halfkp_accumulators[next_ply] = self.halfkp_accumulators[next_ply - 1];
+        }
+        let result = f(self, pos);
+        pos.undo_null_move();
+        result
+    }
+
+    /// ノード数上限・時間切れ・停止フラグ・最大手数ガードの共通チェック (negamax / qsearch 共用)
+    #[inline(always)]
+    pub(super) fn check_node_and_time(
+        &mut self,
+        pos: &Position,
+        ply: usize,
+        ctx: &SearchContext,
+    ) -> Option<i32> {
+        self.nodes += 1;
+        if let Some(max_n) = self.max_nodes
+            && self.nodes >= max_n
+        {
+            ctx.stop_flag.store(true, Ordering::Relaxed);
+            return Some(self.evaluate_at_ply(pos, ply));
+        }
+        if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
+            ctx.stop_flag.store(true, Ordering::Relaxed);
+        }
+        if ctx.stop_flag.load(Ordering::Relaxed) {
+            return Some(0);
+        }
+        if ply >= 64 {
+            return Some(self.evaluate_at_ply(pos, ply));
+        }
+        None
     }
 
     /// ply指定による高速局面評価 (HalfKP差分アキュムレータ活用)
     #[inline(always)]
-    pub fn evaluate_at_ply(&self, pos: &Position, ply: usize) -> i32 {
+    pub(super) fn evaluate_at_ply(&self, pos: &Position, ply: usize) -> i32 {
         match &self.eval_mode {
             crate::eval::EvalMode::Hce => crate::eval::Evaluator::evaluate(pos),
             crate::eval::EvalMode::Nnue(nnue) => nnue.evaluate(pos),
@@ -212,52 +311,6 @@ impl SearchEngine {
         pos: &mut Position,
         target_depth: u8,
     ) -> SearchOutcome {
-        // 1. 定跡データベースの照会 (use_book が有効な場合のみ。探索スコアではなく純粋な定跡手として返却)
-        if self.use_book
-            && let Some(book_move) = OpeningBook::probe(pos)
-        {
-            let legal_moves = MoveGenerator::generate_legal_moves(pos);
-            if legal_moves.contains(&book_move) {
-                return SearchOutcome::Book {
-                    best_move: book_move,
-                };
-            }
-        }
-
-        // 2. 手番側が相手玉を攻められる局面で詰み探索を実行する。
-        let us = pos.side_to_move;
-        let opp = us.opposite();
-        let opp_king_sq = pos.king_sq[opp.index()];
-        let near_king_threat = opp_king_sq.is_some_and(|ks| {
-            (0..81).any(|sq_idx| {
-                if let Some(p) = pos.board[sq_idx]
-                    && p.color == us
-                {
-                    let sq = crate::types::Square::from_index(sq_idx);
-                    let file_diff = (sq.file() as i8 - ks.file() as i8).abs();
-                    let rank_diff = (sq.rank() as i8 - ks.rank() as i8).abs();
-                    return file_diff <= 2 && rank_diff <= 2;
-                }
-                false
-            })
-        });
-
-        if near_king_threat
-            || pos.is_in_check(opp)
-            || !MoveGenerator::generate_checks(pos).is_empty()
-        {
-            let mut dfpn = super::dfpn::DfpnSolver::new(5_000);
-            let (is_mate, mate_move) = dfpn.solve(pos);
-            if is_mate && let Some(mv) = mate_move {
-                return SearchOutcome::MateProven {
-                    best_move: Some(mv),
-                    score: MATE_SCORE - 1,
-                };
-            }
-        }
-
-        self.nodes = 0;
-        self.init_root_accumulator(pos);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let tc = TimeControl {
             infinite: true,
@@ -268,147 +321,23 @@ impl SearchEngine {
             time_mgr: &time_mgr,
             stop_flag: &stop_flag,
         };
-
-        let mut root_moves = MoveGenerator::generate_legal_moves(pos);
-        if root_moves.is_empty() {
-            return SearchOutcome::NoLegalMoves;
-        }
-
-        let mut best_move = root_moves[0];
-        // 深さ1すら完了しなかった場合の安全なフォールバック。
-        let mut best_score = self.evaluate(pos);
-        let mut completed_depth = 0;
-        let mut was_aborted = false;
-
-        'deepening: for depth in 1..=target_depth {
-            let mut alpha = -INF;
-            let mut beta = INF;
-
-            if depth >= 4 && best_score.abs() < MATE_SCORE - 200 {
-                alpha = (best_score - ASPIRATION_DELTA).max(-INF);
-                beta = (best_score + ASPIRATION_DELTA).min(INF);
-            }
-
-            let tt_move = self.tt.probe(pos.hash).and_then(|e| e.best_move);
-            let prev_mv = pos.history.last().map(|rec| rec.mv);
-            let counter_mv = prev_mv.and_then(|pm| {
-                pm.from()
-                    .and_then(|from_sq| self.counter_moves[from_sq.index()][pm.to().index()])
-            });
-            MoveOrderer::order_moves(
-                &mut root_moves,
-                pos,
-                tt_move,
-                &[None, None],
-                counter_mv,
-                Some(&self.history),
-            );
-
-            let mut loop_best_move = None;
-            loop {
-                let mut current_alpha = alpha;
-                for &mv in &root_moves {
-                    pos.do_move(mv);
-                    self.update_accumulator_after_move_at_ply(pos, mv, 1);
-                    let score = -self.negamax(pos, depth - 1, -beta, -current_alpha, 1, true, &ctx);
-                    pos.undo_move();
-
-                    // 中断した深さの結果は採用せず、ルートTTにも保存しない。
-                    if stop_flag.load(Ordering::Relaxed) {
-                        was_aborted = true;
-                        break 'deepening;
-                    }
-
-                    if score > current_alpha {
-                        current_alpha = score;
-                        loop_best_move = Some(mv);
-                    }
-                    if current_alpha >= beta {
-                        break;
-                    }
-                }
-
-                if current_alpha <= alpha {
-                    if alpha == -INF {
-                        best_score = current_alpha;
-                        if let Some(bm) = loop_best_move {
-                            best_move = bm;
-                        }
-                        break;
-                    }
-                    alpha = -INF;
-                } else if current_alpha >= beta {
-                    if beta == INF {
-                        best_score = current_alpha;
-                        if let Some(bm) = loop_best_move {
-                            best_move = bm;
-                        }
-                        break;
-                    }
-                    beta = INF;
-                } else {
-                    best_score = current_alpha;
-                    if let Some(bm) = loop_best_move {
-                        best_move = bm;
-                    }
-                    break;
-                }
-            }
-
-            self.tt.store(
-                pos.hash,
-                depth,
-                Self::score_to_tt(best_score, 0),
-                NodeType::Exact,
-                Some(best_move),
-            );
-
-            completed_depth = depth;
-
-            if best_score.abs() >= MATE_SCORE - 100 {
-                break;
-            }
-        }
-
-        if was_aborted {
-            SearchOutcome::Aborted {
-                completed_depth,
-                fallback_score: best_score,
-                best_move: Some(best_move),
-            }
-        } else {
-            SearchOutcome::Completed {
-                depth: completed_depth,
-                score: best_score,
-                best_move: Some(best_move),
-            }
-        }
-    }
-
-    /// 自己対局・再評価用の固定深さ詳細探索 (後方互換性ラッパー)
-    pub fn search_fixed_depth_detail(
-        &mut self,
-        pos: &mut Position,
-        target_depth: u8,
-    ) -> SearchResult {
-        let outcome = self.search_fixed_depth_outcome(pos, target_depth);
-        let completed_depth = match outcome {
-            SearchOutcome::Completed { depth, .. } => depth,
-            SearchOutcome::Aborted {
-                completed_depth, ..
-            } => completed_depth,
-            SearchOutcome::Book { .. } => 0, // 定跡は探索未実施のため完了深度ゼロ (偽装排除)
-            SearchOutcome::MateProven { .. } => target_depth.max(1),
-            SearchOutcome::NoLegalMoves => target_depth,
+        let spec = RootSearchSpec {
+            start_depth: 1,
+            max_depth: target_depth,
+            use_aspiration: true,
+            check_time_budget: false,
+            check_book: self.use_book,
+            dfpn_precheck: Some(DfpnPrecheck {
+                max_nodes: 5_000,
+                require_near_king_guard: true,
+            }),
+            stop_on_mate: true,
+            emit_pv: false,
         };
-        SearchResult {
-            best_move: outcome.best_move(),
-            score: outcome.score(),
-            completed_depth,
-        }
+        self.run_root_search(pos, &spec, &ctx, |_| {})
     }
 
-    /// 自己対局用の固定深さ探索 (USI標準出力を行わず、最善手と探索スコアを返却)
+    /// 自己対局用の固定深さ探索 (最善手と探索スコアを返却)
     pub fn search_fixed_depth(
         &mut self,
         pos: &mut Position,
@@ -427,9 +356,13 @@ impl SearchEngine {
         rng_seed: u64,
     ) -> (Option<Move>, i32) {
         // 1. 詰み探索 (df-pn Solver) の即時判定
-        let mut dfpn = super::dfpn::DfpnSolver::new(20_000);
-        let (is_mate, mate_move) = dfpn.solve(pos);
-        if is_mate && let Some(mv) = mate_move {
+        if let Some(mv) = Self::probe_dfpn_mate(
+            pos,
+            DfpnPrecheck {
+                max_nodes: 20_000,
+                require_near_king_guard: false,
+            },
+        ) {
             return (Some(mv), MATE_SCORE - 1);
         }
 
@@ -460,10 +393,9 @@ impl SearchEngine {
         let mut scored_moves: Vec<(Move, i32)> = Vec::with_capacity(legal_moves.len());
 
         for &mv in &legal_moves {
-            pos.do_move(mv);
-            self.update_accumulator_after_move_at_ply(pos, mv, 1);
-            let score = -self.negamax(pos, child_depth, -INF, INF, 1, true, &ctx);
-            pos.undo_move();
+            let score = self.with_move(pos, mv, 1, |eng, p| {
+                -eng.negamax(p, child_depth, -INF, INF, 1, true, &ctx)
+            });
             scored_moves.push((mv, score));
         }
 
@@ -514,196 +446,65 @@ impl SearchEngine {
         (best_entry.map(|(m, _)| m), best_score)
     }
 
-    /// 反復深化探索のエントリポイント
+    /// 時間制御付きの反復深化探索（進捗イベントをアダプタへ通知）
+    pub fn search_with_events(
+        &mut self,
+        pos: &mut Position,
+        tc: &TimeControl,
+        stop_flag: Arc<AtomicBool>,
+        on_event: impl FnMut(SearchEvent),
+    ) -> SearchOutcome {
+        let time_mgr = TimeManager::new(tc, pos.side_to_move);
+        let ctx = SearchContext {
+            time_mgr: &time_mgr,
+            stop_flag: &stop_flag,
+        };
+        let spec = RootSearchSpec {
+            start_depth: 1,
+            max_depth: MAX_TIMED_DEPTH,
+            use_aspiration: true,
+            check_time_budget: true,
+            check_book: self.use_book,
+            dfpn_precheck: Some(DfpnPrecheck {
+                max_nodes: 50_000,
+                require_near_king_guard: false,
+            }),
+            stop_on_mate: true,
+            emit_pv: true,
+        };
+        self.run_root_search(pos, &spec, &ctx, on_event)
+    }
+
+    /// 時間制御付きの反復深化探索（標準出力や不要な PV 抽出を行わず最善手のみ返却）
     pub fn search(
         &mut self,
         pos: &mut Position,
         tc: &TimeControl,
         stop_flag: Arc<AtomicBool>,
     ) -> Option<Move> {
-        // 1. 定跡データベース (Opening Book) の照会
-        if let Some(book_move) = OpeningBook::probe(pos) {
-            let legal_moves = MoveGenerator::generate_legal_moves(pos);
-            if legal_moves.contains(&book_move) {
-                println!("info string book move found: {}", book_move.to_usi());
-                return Some(book_move);
-            } else {
-                eprintln!(
-                    "Warning: Book move {} is not legal in current position! Falling back to search.",
-                    book_move.to_usi()
-                );
-            }
-        }
-
-        // 2. 詰み探索 (df-pn Solver) の即時判定
-        // 持ち時間や手数に余裕がある場合、自玉／敵玉の詰みを即座に解決
-        let mut dfpn = super::dfpn::DfpnSolver::new(50_000);
-        let (is_mate, mate_move) = dfpn.solve(pos);
-        if is_mate && let Some(mv) = mate_move {
-            println!("info score mate 1 pv {}", mv.to_usi());
-            return Some(mv);
-        }
-
-        self.nodes = 0;
-        self.init_root_accumulator(pos);
         let time_mgr = TimeManager::new(tc, pos.side_to_move);
         let ctx = SearchContext {
             time_mgr: &time_mgr,
             stop_flag: &stop_flag,
         };
-
-        // 合法手を生成
-        let mut root_moves = MoveGenerator::generate_legal_moves(pos);
-        if root_moves.is_empty() {
-            return None; // 投了
-        }
-
-        let mut best_move = root_moves[0];
-        let mut best_score = -INF;
-        let max_depth: u8 = 32;
-
-        for depth in 1..=max_depth {
-            // 時間切れチェック (反復深化の継続判断)
-            if depth > 1
-                && (!time_mgr.should_continue_deepening() || stop_flag.load(Ordering::Relaxed))
-            {
-                break;
-            }
-
-            let mut current_best_move = None;
-            let mut alpha = -INF;
-            let mut beta = INF;
-
-            // Aspiration Windows (depth >= 4 で吸引窓探索)
-            if depth >= 4 && best_score.abs() < MATE_SCORE - 200 {
-                alpha = (best_score - ASPIRATION_DELTA).max(-INF);
-                beta = (best_score + ASPIRATION_DELTA).min(INF);
-            }
-
-            // ルートの手のオーダリング
-            let tt_move = self.tt.probe(pos.hash).and_then(|e| e.best_move);
-            let prev_mv = pos.history.last().map(|rec| rec.mv);
-            let counter_mv = prev_mv.and_then(|pm| {
-                pm.from()
-                    .and_then(|from_sq| self.counter_moves[from_sq.index()][pm.to().index()])
-            });
-            MoveOrderer::order_moves(
-                &mut root_moves,
-                pos,
-                tt_move,
-                &[None, None],
-                counter_mv,
-                Some(&self.history),
-            );
-
-            let mut abort = false;
-
-            loop {
-                let mut current_alpha = alpha;
-                let mut loop_best_move = None;
-
-                for &mv in &root_moves {
-                    pos.do_move(mv);
-                    self.update_accumulator_after_move_at_ply(pos, mv, 1);
-                    let score = -self.negamax(pos, depth - 1, -beta, -current_alpha, 1, true, &ctx);
-                    pos.undo_move();
-
-                    if stop_flag.load(Ordering::Relaxed) {
-                        abort = true;
-                        break;
-                    }
-
-                    if score > current_alpha {
-                        current_alpha = score;
-                        loop_best_move = Some(mv);
-                    }
-
-                    // 設計レビュー F04: fail-high時は子の探索窓逆転を防ぐため即座にループを脱出
-                    if current_alpha >= beta {
-                        break;
-                    }
-                }
-
-                if abort {
-                    break;
-                }
-
-                // 窓探索の合致判定
-                if current_alpha <= alpha {
-                    if alpha == -INF {
-                        current_best_move = loop_best_move;
-                        best_score = current_alpha;
-                        break;
-                    }
-                    // fail-low: 窓を下方に広げて再探索
-                    alpha = -INF;
-                } else if current_alpha >= beta {
-                    if beta == INF {
-                        current_best_move = loop_best_move;
-                        best_score = current_alpha;
-                        break;
-                    }
-                    // fail-high: 窓を上方に広げて再探索
-                    beta = INF;
-                } else {
-                    current_best_move = loop_best_move;
-                    best_score = current_alpha;
-                    break;
-                }
-            }
-
-            if abort {
-                break;
-            }
-
-            if let Some(bm) = current_best_move {
-                best_move = bm;
-
-                // 置換表にルート局面の結果を保存
-                self.tt.store(
-                    pos.hash,
-                    depth,
-                    Self::score_to_tt(best_score, 0),
-                    NodeType::Exact,
-                    Some(best_move),
-                );
-
-                // PV(読み筋)の構築
-                let pv = self.extract_pv(pos, best_move, depth);
-
-                // USI info 出力
-                let elapsed_ms = time_mgr.elapsed_ms().max(1);
-                let nps = (self.nodes as u128 * 1000) / elapsed_ms as u128;
-                let pv_str = pv.iter().map(|m| m.to_usi()).collect::<Vec<_>>().join(" ");
-
-                let score_str = if best_score.abs() >= MATE_SCORE - 100 {
-                    let mate_in = if best_score > 0 {
-                        ((MATE_SCORE - best_score) + 1) / 2
-                    } else {
-                        -((MATE_SCORE + best_score) + 1) / 2
-                    };
-                    format!("score mate {mate_in}")
-                } else {
-                    format!("score cp {best_score}")
-                };
-
-                println!(
-                    "info depth {} {} time {} nodes {} nps {} pv {}",
-                    depth, score_str, elapsed_ms, self.nodes, nps, pv_str
-                );
-
-                // 詰みが見つかった場合は探索終了
-                if best_score.abs() >= MATE_SCORE - 100 {
-                    break;
-                }
-            }
-        }
-
-        Some(best_move)
+        let spec = RootSearchSpec {
+            start_depth: 1,
+            max_depth: MAX_TIMED_DEPTH,
+            use_aspiration: true,
+            check_time_budget: true,
+            check_book: self.use_book,
+            dfpn_precheck: Some(DfpnPrecheck {
+                max_nodes: 50_000,
+                require_near_king_guard: false,
+            }),
+            stop_on_mate: true,
+            emit_pv: false,
+        };
+        self.run_root_search(pos, &spec, &ctx, |_| {}).best_move()
     }
 
     /// Lazy SMP ヘルパースレッド用探索ルーチン
-    /// メインスレッドとは異なる深さ・探索順序で共有置換表を更新する
+    /// メインスレッドとは異なる初期深さで共有置換表を更新する
     pub fn search_helper(
         &mut self,
         pos: &mut Position,
@@ -711,85 +512,237 @@ impl SearchEngine {
         stop_flag: Arc<AtomicBool>,
         thread_id: usize,
     ) {
-        self.nodes = 0;
-        self.init_root_accumulator(pos);
         let time_mgr = TimeManager::new(tc, pos.side_to_move);
         let ctx = SearchContext {
             time_mgr: &time_mgr,
             stop_flag: &stop_flag,
         };
+        let spec = RootSearchSpec {
+            start_depth: (thread_id % 2) as u8 + 1,
+            max_depth: MAX_TIMED_DEPTH,
+            use_aspiration: false,
+            check_time_budget: true,
+            check_book: false,
+            dfpn_precheck: None,
+            stop_on_mate: false,
+            emit_pv: false,
+        };
+        let _ = self.run_root_search(pos, &spec, &ctx, |_| {});
+    }
+
+    /// 全探索エントリポイントで共有される単一のルート反復深化エンジン
+    fn run_root_search(
+        &mut self,
+        pos: &mut Position,
+        spec: &RootSearchSpec,
+        ctx: &SearchContext,
+        mut on_event: impl FnMut(SearchEvent),
+    ) -> SearchOutcome {
+        // 1. 定跡データベースの照会 (use_book が有効な場合のみ)
+        if spec.check_book
+            && let Some(book_move) = OpeningBook::probe(pos)
+        {
+            let legal_moves = MoveGenerator::generate_legal_moves(pos);
+            if legal_moves.contains(&book_move) {
+                on_event(SearchEvent::BookMove(book_move));
+                return SearchOutcome::Book {
+                    best_move: book_move,
+                };
+            } else {
+                on_event(SearchEvent::IllegalBookMove(book_move));
+            }
+        }
+
+        // 2. df-pn 詰み探索の事前チェック
+        if let Some(precheck) = spec.dfpn_precheck
+            && let Some(mv) = Self::probe_dfpn_mate(pos, precheck)
+        {
+            on_event(SearchEvent::MateFound(mv));
+            return SearchOutcome::MateProven {
+                best_move: Some(mv),
+                score: MATE_SCORE - 1,
+            };
+        }
+
+        self.nodes = 0;
+        self.init_root_accumulator(pos);
 
         let mut root_moves = MoveGenerator::generate_legal_moves(pos);
         if root_moves.is_empty() {
-            return;
+            return SearchOutcome::NoLegalMoves;
         }
 
-        // スレッドごとに初期深さオフセットを分散 (Lazy SMP standard)
-        let start_depth = (thread_id % 2) as u8 + 1;
-        let max_depth: u8 = 32;
+        let mut best_move = root_moves[0];
+        let mut best_score = self.evaluate_at_ply(pos, 0);
+        let mut completed_depth = 0u8;
+        let mut aborted_mid_iteration = false;
 
-        for depth in start_depth..=max_depth {
-            if depth > 1
-                && (!time_mgr.should_continue_deepening() || stop_flag.load(Ordering::Relaxed))
-            {
-                break;
+        'deepening: for depth in spec.start_depth..=spec.max_depth {
+            if spec.check_time_budget && depth > 1 {
+                if ctx.stop_flag.load(Ordering::Relaxed) {
+                    if completed_depth == 0 {
+                        aborted_mid_iteration = true;
+                    }
+                    break;
+                }
+                if !ctx.time_mgr.should_continue_deepening() {
+                    if completed_depth == 0 {
+                        aborted_mid_iteration = true;
+                    }
+                    break;
+                }
             }
-
-            let tt_move = self.tt.probe(pos.hash).and_then(|e| e.best_move);
-            let prev_mv = pos.history.last().map(|rec| rec.mv);
-            let counter_mv = prev_mv.and_then(|pm| {
-                pm.from()
-                    .and_then(|from_sq| self.counter_moves[from_sq.index()][pm.to().index()])
-            });
-            MoveOrderer::order_moves(
-                &mut root_moves,
-                pos,
-                tt_move,
-                &[None, None],
-                counter_mv,
-                Some(&self.history),
-            );
 
             let mut alpha = -INF;
-            let beta = INF;
-            let mut best_score = -INF;
-            let mut best_move = None;
-
-            for &mv in &root_moves {
-                if stop_flag.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                pos.do_move(mv);
-                self.update_accumulator_after_move_at_ply(pos, mv, 1);
-                let score = -self.negamax(pos, depth - 1, -beta, -alpha, 1, true, &ctx);
-                pos.undo_move();
-
-                if stop_flag.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                if score > best_score {
-                    best_score = score;
-                    best_move = Some(mv);
-                }
-                if score > alpha {
-                    alpha = score;
-                }
+            let mut beta = INF;
+            if spec.use_aspiration && depth >= 4 && best_score.abs() < MATE_SCORE - 200 {
+                alpha = (best_score - ASPIRATION_DELTA).max(-INF);
+                beta = (best_score + ASPIRATION_DELTA).min(INF);
             }
 
-            if !stop_flag.load(Ordering::Relaxed)
-                && let Some(bm) = best_move
-            {
+            self.order_root_moves(pos, &mut root_moves);
+
+            let (iter_best_move, iter_score) = loop {
+                let mut current_alpha = alpha;
+                let mut loop_best_move = None;
+
+                for &mv in &root_moves {
+                    if ctx.stop_flag.load(Ordering::Relaxed) {
+                        aborted_mid_iteration = true;
+                        break 'deepening;
+                    }
+
+                    let score = self.with_move(pos, mv, 1, |eng, p| {
+                        -eng.negamax(p, depth - 1, -beta, -current_alpha, 1, true, ctx)
+                    });
+
+                    // 中断した深さの結果は採用せず、ルートTTにも保存しない。
+                    if ctx.stop_flag.load(Ordering::Relaxed) {
+                        aborted_mid_iteration = true;
+                        break 'deepening;
+                    }
+
+                    if score > current_alpha {
+                        current_alpha = score;
+                        loop_best_move = Some(mv);
+                    }
+                    if current_alpha >= beta {
+                        break;
+                    }
+                }
+
+                if current_alpha <= alpha {
+                    if alpha == -INF {
+                        break (loop_best_move, current_alpha);
+                    }
+                    alpha = -INF;
+                } else if current_alpha >= beta {
+                    if beta == INF {
+                        break (loop_best_move, current_alpha);
+                    }
+                    beta = INF;
+                } else {
+                    break (loop_best_move, current_alpha);
+                }
+            };
+
+            if let Some(bm) = iter_best_move {
+                best_move = bm;
+                best_score = iter_score;
+
                 self.tt.store(
                     pos.hash,
                     depth,
                     Self::score_to_tt(best_score, 0),
                     NodeType::Exact,
-                    Some(bm),
+                    Some(best_move),
                 );
+                completed_depth = depth;
+
+                if spec.emit_pv {
+                    let elapsed_ms = ctx.time_mgr.elapsed_ms().max(1);
+                    let nps = ((self.nodes as u128 * 1000) / elapsed_ms as u128) as u64;
+                    let pv = self.extract_pv(pos, best_move, depth);
+                    on_event(SearchEvent::Iteration(SearchInfo {
+                        depth,
+                        score: best_score,
+                        elapsed_ms,
+                        nodes: self.nodes,
+                        nps,
+                        pv,
+                    }));
+                }
+
+                if spec.stop_on_mate && best_score.abs() >= MATE_SCORE - 100 {
+                    break;
+                }
+            } else {
+                best_score = iter_score;
+                completed_depth = depth;
             }
         }
+
+        if aborted_mid_iteration {
+            SearchOutcome::Aborted {
+                completed_depth,
+                fallback_score: best_score,
+                best_move: Some(best_move),
+            }
+        } else {
+            SearchOutcome::Completed {
+                depth: completed_depth,
+                score: best_score,
+                best_move: Some(best_move),
+            }
+        }
+    }
+
+    fn order_root_moves(&self, pos: &Position, root_moves: &mut [Move]) {
+        let tt_move = self.tt.probe(pos.hash).and_then(|e| e.best_move);
+        let prev_mv = pos.history.last().map(|rec| rec.mv);
+        let counter_mv = prev_mv.and_then(|pm| {
+            pm.from()
+                .and_then(|from_sq| self.counter_moves[from_sq.index()][pm.to().index()])
+        });
+        MoveOrderer::order_moves(
+            root_moves,
+            pos,
+            tt_move,
+            &[None, None],
+            counter_mv,
+            Some(&self.history),
+        );
+    }
+
+    fn probe_dfpn_mate(pos: &mut Position, precheck: DfpnPrecheck) -> Option<Move> {
+        if precheck.require_near_king_guard {
+            let us = pos.side_to_move;
+            let opp = us.opposite();
+            let opp_king_sq = pos.king_sq[opp.index()];
+            let near_king_threat = opp_king_sq.is_some_and(|ks| {
+                (0..81).any(|sq_idx| {
+                    if let Some(p) = pos.board[sq_idx]
+                        && p.color == us
+                    {
+                        let sq = crate::types::Square::from_index(sq_idx);
+                        let file_diff = (sq.file() as i8 - ks.file() as i8).abs();
+                        let rank_diff = (sq.rank() as i8 - ks.rank() as i8).abs();
+                        return file_diff <= 2 && rank_diff <= 2;
+                    }
+                    false
+                })
+            });
+            if !near_king_threat
+                && !pos.is_in_check(opp)
+                && MoveGenerator::generate_checks(pos).is_empty()
+            {
+                return None;
+            }
+        }
+
+        let mut dfpn = super::dfpn::DfpnSolver::new(precheck.max_nodes);
+        let (is_mate, mate_move) = dfpn.solve(pos);
+        if is_mate { mate_move } else { None }
     }
 
     #[inline]
@@ -826,24 +779,8 @@ impl SearchEngine {
         allow_null: bool,
         ctx: &SearchContext,
     ) -> i32 {
-        // 定期的な時間チェック & ノード数制限チェック
-        self.nodes += 1;
-        if let Some(max_n) = self.max_nodes
-            && self.nodes >= max_n
-        {
-            ctx.stop_flag.store(true, Ordering::Relaxed);
-            return self.evaluate_at_ply(pos, ply);
-        }
-        if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && ctx.time_mgr.is_time_up() {
-            ctx.stop_flag.store(true, Ordering::Relaxed);
-        }
-        if ctx.stop_flag.load(Ordering::Relaxed) {
-            return 0;
-        }
-
-        // 最大探索手数 (MAX_PLY) ガード
-        if ply >= 64 {
-            return self.evaluate_at_ply(pos, ply);
+        if let Some(early_score) = self.check_node_and_time(pos, ply, ctx) {
+            return early_score;
         }
 
         // 千日手判定
@@ -860,7 +797,7 @@ impl SearchEngine {
 
         // 葉ノード判定: 静止探索へ
         if depth == 0 {
-            return self.quiescence(pos, alpha, beta, ply, ctx);
+            return super::qsearch::quiescence(self, pos, alpha, beta, ply, ctx);
         }
 
         let orig_alpha = alpha;
@@ -889,23 +826,17 @@ impl SearchEngine {
 
         // Null Move Pruning (パス枝刈り: R = 2)
         if allow_null && !in_check && depth >= 3 && ply > 0 {
-            // do_null_move はハッシュ・手番・手数を一括更新する安全なインターフェース
-            pos.do_null_move();
-            if ply + 1 < self.halfkp_accumulators.len() {
-                self.halfkp_accumulators[ply + 1] = self.halfkp_accumulators[ply];
-            }
-
-            let null_score = -self.negamax(
-                pos,
-                depth.saturating_sub(3),
-                -beta,
-                -beta + 1,
-                ply + 1,
-                false,
-                ctx,
-            );
-
-            pos.undo_null_move();
+            let null_score = self.with_null_move(pos, ply + 1, |eng, p| {
+                -eng.negamax(
+                    p,
+                    depth.saturating_sub(3),
+                    -beta,
+                    -beta + 1,
+                    ply + 1,
+                    false,
+                    ctx,
+                )
+            });
 
             if ctx.stop_flag.load(Ordering::Relaxed) {
                 return 0;
@@ -938,10 +869,8 @@ impl SearchEngine {
         let mut moves = MoveGenerator::generate_legal_moves(pos);
         if moves.is_empty() {
             if in_check {
-                // 詰み (手番側の負け)
                 return -MATE_SCORE + (ply as i32);
             } else {
-                // ステイルメイト（通常将棋では稀）
                 return 0;
             }
         }
@@ -1004,41 +933,39 @@ impl SearchEngine {
                 false
             };
 
-            pos.do_move(mv);
-            self.update_accumulator_after_move_at_ply(pos, mv, ply + 1);
-
-            let mut score;
             let is_pv_move = move_count == 1;
-
             let ext = if is_recapture && depth <= 6 { 1 } else { 0 };
 
-            if is_pv_move {
-                // PVS: 1手目はフルウィンドウで探索
-                score = -self.negamax(pos, depth - 1 + ext, -beta, -alpha, ply + 1, true, ctx);
-            } else {
-                // 2手目以降: LMR 適用深さの計算
-                let mut search_depth = depth - 1 + ext;
-                if depth >= 3 && move_count >= 4 && !is_tactical && !in_check {
-                    search_depth = search_depth.saturating_sub(1);
+            let score = self.with_move(pos, mv, ply + 1, |eng, p| {
+                if is_pv_move {
+                    -eng.negamax(p, depth - 1 + ext, -beta, -alpha, ply + 1, true, ctx)
+                } else {
+                    let mut search_depth = depth - 1 + ext;
+                    if depth >= 3 && move_count >= 4 && !is_tactical && !in_check {
+                        search_depth = search_depth.saturating_sub(1);
+                    }
+
+                    let mut s =
+                        -eng.negamax(p, search_depth, -alpha - 1, -alpha, ply + 1, true, ctx);
+
+                    if s > alpha && search_depth < depth - 1 + ext {
+                        s = -eng.negamax(
+                            p,
+                            depth - 1 + ext,
+                            -alpha - 1,
+                            -alpha,
+                            ply + 1,
+                            true,
+                            ctx,
+                        );
+                    }
+
+                    if s > alpha && s < beta {
+                        s = -eng.negamax(p, depth - 1 + ext, -beta, -alpha, ply + 1, true, ctx);
+                    }
+                    s
                 }
-
-                // PVS: Null Window (Scout Search) で高速チェック
-                score = -self.negamax(pos, search_depth, -alpha - 1, -alpha, ply + 1, true, ctx);
-
-                // LMR 再探索の厳密化 (設計レビュー F03):
-                // 1. 深さを削った探索が alpha を超えた場合、まず元の深さで確認再探索
-                if score > alpha && search_depth < depth - 1 + ext {
-                    score =
-                        -self.negamax(pos, depth - 1 + ext, -alpha - 1, -alpha, ply + 1, true, ctx);
-                }
-
-                // 2. PVノードにおいて alpha を超えていれば、フルウィンドウで再探索
-                if score > alpha && score < beta {
-                    score = -self.negamax(pos, depth - 1 + ext, -beta, -alpha, ply + 1, true, ctx);
-                }
-            }
-
-            pos.undo_move();
+            });
 
             if ctx.stop_flag.load(Ordering::Relaxed) {
                 return 0;
@@ -1054,20 +981,16 @@ impl SearchEngine {
             }
 
             if alpha >= beta {
-                // ベータカット (Beta Cutoff)
                 if ply < 64 && !mv.is_drop() && pos.board[mv.to().index()].is_none() {
-                    // キラー手の更新
                     if self.killer_moves[ply][0] != Some(mv) {
                         self.killer_moves[ply][1] = self.killer_moves[ply][0];
                         self.killer_moves[ply][0] = Some(mv);
                     }
-                    // 応手 (Countermove) の更新
                     if let Some(pm) = prev_mv
                         && let Some(p_from) = pm.from()
                     {
                         self.counter_moves[p_from.index()][pm.to().index()] = Some(mv);
                     }
-                    // 歴史ヒューリスティックの加算 (設計レビュー F10: u8オーバーフロー修正)
                     if let Some(from_sq) = mv.from() {
                         let d = depth as i32;
                         self.history[from_sq.index()][mv.to().index()] += d * d;
@@ -1097,19 +1020,6 @@ impl SearchEngine {
         best_score
     }
 
-    /// 静止探索 (Quiescence Search) + SEE Pruning (qsearch モジュールに委譲)
-    #[inline]
-    fn quiescence(
-        &mut self,
-        pos: &mut Position,
-        alpha: i32,
-        beta: i32,
-        ply: usize,
-        ctx: &SearchContext,
-    ) -> i32 {
-        super::qsearch::quiescence(self, pos, alpha, beta, ply, ctx)
-    }
-
     /// 置換表を辿ってPV（読み筋）を取り出す
     fn extract_pv(&mut self, pos: &mut Position, first_move: Move, max_depth: u8) -> Vec<Move> {
         let mut pv = Vec::new();
@@ -1127,7 +1037,6 @@ impl SearchEngine {
             if let Some(entry) = self.tt.probe(pos.hash) {
                 if let Some(mv) = entry.best_move {
                     pos.do_move(mv);
-                    // ループが生じる局面はPVの打ち切り
                     if !visited.insert(pos.hash) {
                         pos.undo_move();
                         break;
@@ -1142,11 +1051,110 @@ impl SearchEngine {
             }
         }
 
-        // 盤面を元に戻す
         for _ in 0..moves_done.len() {
             pos.undo_move();
         }
 
         pv
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::{EvalMode, HalfKPEvaluator};
+    use crate::selfplay::game::SimpleRng;
+
+    #[test]
+    fn with_move_and_with_null_move_keep_halfkp_accumulator_exact_across_plies() {
+        let mut eval_inst = HalfKPEvaluator::new();
+        for row in eval_inst.feature_weights.iter_mut().take(500) {
+            row[0] = 25;
+            row[63] = -18;
+        }
+        eval_inst.output_weights[0] = 40;
+        eval_inst.output_weights[128] = -35;
+        eval_inst.output_bias = 100;
+
+        let eval = Arc::new(eval_inst);
+        let mut engine = SearchEngine::new(4).with_eval_mode(EvalMode::HalfKP(Arc::clone(&eval)));
+        let mut pos = Position::startpos();
+        let mut rng = SimpleRng::new(0xABCDEF1234567890);
+
+        engine.init_root_accumulator(&pos);
+        assert_eq!(engine.evaluate_at_ply(&pos, 0), eval.evaluate(&pos));
+
+        // Walk 4 nested plies plus a null-move + post-null child move and verify exact match at every ply.
+        let moves1 = MoveGenerator::generate_legal_moves(&mut pos);
+        let m1 = moves1[rng.gen_range(moves1.len())];
+        engine.with_move(&mut pos, m1, 1, |eng1, p1| {
+            assert_eq!(eng1.evaluate_at_ply(p1, 1), eval.evaluate(p1));
+            eng1.with_null_move(p1, 2, |eng_n, pn| {
+                assert_eq!(eng_n.evaluate_at_ply(pn, 2), eval.evaluate(pn));
+                let moves_n = MoveGenerator::generate_legal_moves(pn);
+                if !moves_n.is_empty() {
+                    let mn = moves_n[rng.gen_range(moves_n.len())];
+                    eng_n.with_move(pn, mn, 3, |eng_n3, pn3| {
+                        assert_eq!(eng_n3.evaluate_at_ply(pn3, 3), eval.evaluate(pn3));
+                    });
+                }
+            });
+            let moves2 = MoveGenerator::generate_legal_moves(p1);
+            let m2 = moves2[rng.gen_range(moves2.len())];
+            eng1.with_move(p1, m2, 2, |eng2, p2| {
+                assert_eq!(eng2.evaluate_at_ply(p2, 2), eval.evaluate(p2));
+                let moves3 = MoveGenerator::generate_legal_moves(p2);
+                let m3 = moves3[rng.gen_range(moves3.len())];
+                eng2.with_move(p2, m3, 3, |eng3, p3| {
+                    assert_eq!(eng3.evaluate_at_ply(p3, 3), eval.evaluate(p3));
+                    let moves4 = MoveGenerator::generate_legal_moves(p3);
+                    let m4 = moves4[rng.gen_range(moves4.len())];
+                    eng3.with_move(p3, m4, 4, |eng4, p4| {
+                        assert_eq!(eng4.evaluate_at_ply(p4, 4), eval.evaluate(p4));
+                    });
+                });
+            });
+        });
+        assert_eq!(pos.to_sfen(), Position::startpos().to_sfen());
+    }
+
+    #[test]
+    fn timed_search_respects_use_book_flag_and_emits_events() {
+        let mut pos = Position::startpos();
+        let tc = TimeControl {
+            byoyomi: Some(50),
+            ..Default::default()
+        };
+
+        // use_book = true hits opening book on startpos
+        let mut book_engine = SearchEngine::new(1);
+        book_engine.use_book = true;
+        let mut saw_book = false;
+        let out =
+            book_engine.search_with_events(&mut pos, &tc, Arc::new(AtomicBool::new(false)), |ev| {
+                if matches!(ev, SearchEvent::BookMove(_)) {
+                    saw_book = true;
+                }
+            });
+        assert!(matches!(out, SearchOutcome::Book { .. }));
+        assert!(saw_book);
+
+        // use_book = false skips opening book and runs actual search iterations
+        let mut nobook_engine = SearchEngine::new(1);
+        nobook_engine.use_book = false;
+        nobook_engine.max_nodes = Some(500);
+        let mut saw_iter = false;
+        let out2 = nobook_engine.search_with_events(
+            &mut pos,
+            &tc,
+            Arc::new(AtomicBool::new(false)),
+            |ev| {
+                if matches!(ev, SearchEvent::Iteration(_)) {
+                    saw_iter = true;
+                }
+            },
+        );
+        assert!(!matches!(out2, SearchOutcome::Book { .. }));
+        assert!(saw_iter || matches!(out2, SearchOutcome::Aborted { .. }));
     }
 }
