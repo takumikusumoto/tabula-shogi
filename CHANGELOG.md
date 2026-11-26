@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-11-26
 
 > **Note**: 本リリースの同梱バイナリは **HCE（手動評価関数）** が既定で動作します。HalfKP 評価エンジンおよび自律学習パイプライン（`loop` / `export-halfkp`）は完全内蔵されており、`models/best_halfkp.bin`（`TABU_HK2` 形式）を配置すると自動で読み込まれます。学習済み HalfKP 重みファイルは SPRT 昇格完了後に OS 非依存の別アセットとして配布予定です。
 
